@@ -1,0 +1,40 @@
+# Maintainer: Lucas Bartholemy <lucas@humhub.com>
+pkgname=fsnitch
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Interactive file-access guard for the Linux desktop (OpenSnitch, for files)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/balemy/fsnitch"
+license=('MIT')
+depends=('systemd' 'gtk4' 'gtk4-layer-shell')
+makedepends=('cargo')
+backup=('etc/fsnitch/config.toml')
+install="$pkgname.install"
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')  # replace with the real checksum at release (step 4)
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
+    cargo build --frozen --release -p fsnitchd --features session-hardening
+    cargo build --frozen --release -p fsnitch-cli -p fsnitch-agent
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 target/release/fsnitchd      "$pkgdir/usr/bin/fsnitchd"
+    install -Dm755 target/release/fsnitch       "$pkgdir/usr/bin/fsnitch"
+    install -Dm755 target/release/fsnitch-agent "$pkgdir/usr/bin/fsnitch-agent"
+    install -Dm644 packaging/fsnitchd.service      "$pkgdir/usr/lib/systemd/system/fsnitchd.service"
+    install -Dm644 packaging/fsnitch-agent.service "$pkgdir/usr/lib/systemd/user/fsnitch-agent.service"
+    install -Dm644 packaging/config.toml "$pkgdir/etc/fsnitch/config.toml"
+    install -dm755 "$pkgdir/etc/fsnitch/paths.d"
+    install -Dm644 LICENSE   "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

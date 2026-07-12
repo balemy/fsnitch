@@ -1,0 +1,18 @@
+post_install() {
+    cat <<'MSG'
+==> fsnitch installed.  Activate it with:
+      sudo systemctl enable --now fsnitchd           # guard daemon (root)
+      systemctl --user enable --now fsnitch-agent    # prompt agent (graphical session)
+
+    Then protect paths:
+      sudo fsnitch protect <path> [--program /usr/bin/app]
+      sudo fsnitch preset apply browsers             # see: fsnitch preset list
+
+    Recommended companion hardening:
+      sysctl kernel.yama.ptrace_scope=1
+MSG
+}
+
+post_upgrade() {
+    :
+}

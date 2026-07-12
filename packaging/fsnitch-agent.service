@@ -1,0 +1,14 @@
+[Unit]
+Description=fsnitch prompt agent
+Documentation=https://github.com/balemy/fsnitch
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fsnitch-agent
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

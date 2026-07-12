@@ -1,0 +1,41 @@
+[Unit]
+Description=fsnitch file access guard
+Documentation=https://github.com/balemy/fsnitch
+After=local-fs.target
+
+# Note: WatchdogSec/sd_notify heartbeat is speced but deferred to a later
+# milestone (needs the sd-notify integration in the daemon).
+[Service]
+Type=simple
+ExecStart=/usr/bin/fsnitchd
+Restart=always
+RestartSec=1
+
+# Managed directories: systemd creates/owns these with the given perms
+# instead of the daemon relying on pre-existing paths.
+# 0755 so the non-root user agent can traverse to the socket; the socket file
+# itself is 0666 and SO_PEERCRED gates capabilities (uid 0 = control, else agent).
+RuntimeDirectory=fsnitch
+RuntimeDirectoryMode=0755
+LogsDirectory=fsnitch
+LogsDirectoryMode=0750
+
+# Hardening (spec: Security Considerations)
+# CAP_SYS_ADMIN: fanotify_init/mark. CAP_DAC_READ_SEARCH: read any protected path.
+# CAP_SYS_PTRACE: read /proc/<pid>/exe of processes owned by other UIDs
+# (subject identification) — this goes through ptrace_may_access, which
+# CAP_DAC_READ_SEARCH does NOT satisfy; without it the allowlist silently
+# fails for every non-root subject.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+ProtectSystem=strict
+ReadWritePaths=/var/log/fsnitch /run/fsnitch /etc/fsnitch
+ProtectHome=read-only
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target

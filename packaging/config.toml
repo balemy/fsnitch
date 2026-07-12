@@ -1,0 +1,27 @@
+# fsnitch daemon configuration.  See the README / `fsnitch help`.
+#
+# Prefer the CLI over editing this file:
+#   sudo fsnitch protect <path> [--program /usr/bin/app]
+#   sudo fsnitch preset apply browsers      # curated packs; `fsnitch preset list`
+# Hand-written [[path]] blocks are also honored (and drop-ins in
+# /etc/fsnitch/paths.d/*.toml).
+
+[general]
+# Only an agent running in the same user's ACTIVE GRAPHICAL logind session may
+# answer prompts.  This package is built with the `session-hardening` feature,
+# so this is enforced.  Set to false on headless systems (or use a build
+# without the feature).
+require_agent_session = true
+
+# Defaults shown for reference — uncomment to change:
+# timeout = 30                 # seconds to wait for an agent verdict
+# on_no_answer = "deny"        # verdict if the prompt times out
+# on_no_agent  = "deny"        # verdict if no agent is registered
+# log_file = "/var/log/fsnitch/events.jsonl"
+# agent    = "/usr/bin/fsnitch-agent"
+
+# Example (commented) — guard a vault, allow only keepassxc:
+# [[path]]
+# path  = "/home/YOU/vaults"
+# mode  = "ask"                # block | ask | watch
+# allow = [{ program = "/usr/bin/keepassxc" }]

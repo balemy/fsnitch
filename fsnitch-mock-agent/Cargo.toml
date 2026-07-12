@@ -1,0 +1,13 @@
+[package]
+name = "fsnitch-mock-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fsnitch-mock-agent"
+path = "src/main.rs"
+
+[dependencies]
+fsnitch-core = { path = "../fsnitch-core" }
+anyhow = "1"
