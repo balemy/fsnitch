@@ -1,6 +1,6 @@
 # fsnitch Roadmap
 
-High-level direction. See `docs/CONFIGURATION.md` and `SECURITY.md` for how the
+High-level direction. See `CONFIGURATION.md` and `SECURITY.md` for how the
 current features work and what they do (and don't) protect against.
 
 ## Guiding principle: lightweight by default, hardening is opt-in
