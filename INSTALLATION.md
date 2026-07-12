@@ -67,12 +67,12 @@ feature; leaving it `true` just logs a startup warning).
 ## Binary package
 
 Prebuilt binaries are attached to each [GitHub
-Release](https://github.com/balemy/fsnitch/releases) once 1.0 ships. Download
-the archive, unpack it, and run the bundled installer:
+Release](https://github.com/balemy/fsnitch/releases). Download the archive,
+unpack it, and run the bundled installer:
 
 ```sh
-tar xf fsnitch-1.0.0-x86_64-linux.tar.zst
-cd fsnitch-1.0.0-x86_64-linux
+tar xf fsnitch-0.5.0-x86_64-linux.tar.zst
+cd fsnitch-0.5.0-x86_64-linux
 sudo ./install.sh
 ```
 
