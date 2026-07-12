@@ -75,9 +75,9 @@ warning) so a reused pid cannot be substituted between the check and its use.
 Every build also verifies the peer is running the configured `agent` binary.
 
 **Optional session hardening.** Built with `--features session-hardening` (which
-links libsystemd), the daemon additionally requires the agent to run inside the
-same uid's *active graphical* logind session — a `tty` or background session
-does not qualify. The default lightweight build omits this (and libsystemd); on
+links libsystemd), the daemon additionally requires the agent's uid to have an
+*active graphical* logind session — a `tty` or headless login does not qualify
+(so the agent may run as a systemd user service). The default lightweight build omits this (and libsystemd); on
 it, `require_agent_session = true` is logged as an ineffective warning at
 startup. Honest limit: a human still answers the dialog either way — session
 binding narrows *who may register* as the agent to the live graphical seat, it

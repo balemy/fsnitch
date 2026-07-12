@@ -102,14 +102,15 @@ pub fn handle_agent_connection(
         }
     }
 
-    // (2) if required, the peer must be in an active graphical logind session
-    // owned by the same uid.
-    if crate::agent_trust::session_gate(pid, peer_uid, rt.require_agent_session) {
+    // (2) if required, the peer's uid must have an active graphical logind
+    // session (binds to the user's graphical seat, not the agent process — so a
+    // systemd user service works).
+    if crate::agent_trust::session_gate(peer_uid, rt.require_agent_session) {
         let _ = write_msg(
             &mut &stream,
             &DaemonMsg::Event {
                 kind: "error".into(),
-                message: "agent not in an active graphical session".into(),
+                message: "no active graphical session for your user".into(),
             },
         );
         return;

@@ -50,8 +50,8 @@ require_agent_session = true                            # require the agent in t
 - **`max_pending`** — when this many prompts are already parked, further
   `ask`-mode opens take `on_no_answer` immediately instead of queueing
   unbounded.
-- **`require_agent_session`** — when `true`, the agent must run inside the
-  uid's *active graphical* logind session. This is enforced **only** in a build
+- **`require_agent_session`** — when `true`, the agent's uid must have an
+  *active graphical* logind session. This is enforced **only** in a build
   with `--features session-hardening`; on the default lightweight build it is
   logged as an ineffective warning at startup. Set it to `false` for headless,
   CI, or dev setups. See [SECURITY.md](SECURITY.md#control-plane-and-agent-trust).

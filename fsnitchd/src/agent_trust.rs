@@ -1,7 +1,8 @@
-//! Peer trust for agent connections: pin the peer via a pidfd, then require it
-//! to be the agent binary in an active graphical logind session (same uid).
-//! The pure decision (`evaluate_session`) is unit-tested; the pidfd/sd-login
-//! plumbing needs a real session and is exercised via dev-run + manual checks.
+//! Peer trust for agent connections: pin the peer via a pidfd, require it to be
+//! the configured agent binary, and (when hardening is on) require the peer's
+//! uid to have an active graphical logind session. The pure decision
+//! (`evaluate_session`) is unit-tested; the sd-login plumbing needs a real
+//! session and is exercised via dev-run + manual checks.
 
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
@@ -59,23 +60,25 @@ pub fn pid_from_pidfd(pidfd: &OwnedFd) -> Option<i32> {
         .find_map(|l| l.strip_prefix("Pid:").and_then(|v| v.trim().parse().ok()))
 }
 
-/// Session-binding gate. Hardened build: reject unless the peer is in an active
-/// graphical logind session owned by `peer_uid` (when `require`). Base build:
-/// always allow (the session check is compiled out; main() warns at startup if
-/// `require` is set so the operator isn't misled).
+/// Session-binding gate. Hardened build: reject unless `peer_uid` has an active
+/// graphical logind session (when `require`). This binds to the user's graphical
+/// seat, not to the agent process itself, so the agent may run as a systemd user
+/// service (which lives outside the logind session scope). Base build: always
+/// allow (the check is compiled out; main() warns at startup if `require` is set
+/// so the operator isn't misled).
 #[cfg(feature = "session-hardening")]
-pub fn session_gate(pid: i32, peer_uid: u32, require: bool) -> bool {
+pub fn session_gate(peer_uid: u32, require: bool) -> bool {
     if !require {
         return false;
     }
-    let info = session_of(pid);
+    let info = session_of_uid(peer_uid);
     let verdict = evaluate_session(info.as_ref(), peer_uid);
     if verdict != SessionVerdict::Ok {
         tracing::warn!(
             ?verdict,
             session = ?info,
             uid = peer_uid,
-            "agent not in an active graphical session; rejecting"
+            "no active graphical session for the agent's uid; rejecting"
         );
         return true;
     }
@@ -83,38 +86,37 @@ pub fn session_gate(pid: i32, peer_uid: u32, require: bool) -> bool {
 }
 
 #[cfg(not(feature = "session-hardening"))]
-pub fn session_gate(_pid: i32, _peer_uid: u32, _require: bool) -> bool {
+pub fn session_gate(_peer_uid: u32, _require: bool) -> bool {
     false
 }
 
 // --- libsystemd sd-login FFI (isolated; the only unsafe here) ---
 #[cfg(feature = "session-hardening")]
 mod sd {
-    use libc::{c_char, c_int, free, pid_t, uid_t};
+    use libc::{c_char, c_int, free, uid_t};
     use std::ffi::{c_void, CStr};
 
     #[link(name = "systemd")]
     extern "C" {
-        fn sd_pid_get_session(pid: pid_t, session: *mut *mut c_char) -> c_int;
+        fn sd_uid_get_display(uid: uid_t, session: *mut *mut c_char) -> c_int;
         fn sd_session_is_active(session: *const c_char) -> c_int;
         fn sd_session_get_type(session: *const c_char, type_: *mut *mut c_char) -> c_int;
-        fn sd_session_get_uid(session: *const c_char, uid: *mut uid_t) -> c_int;
     }
 
-    /// Gather the peer's session facts, or None if the pid is in no logind
-    /// session (or sd-login errors). Frees all libsystemd-allocated strings.
-    pub fn session_of(pid: i32) -> Option<super::SessionInfo> {
-        // SAFETY: FFI to libsystemd; out-pointers are freed below; strings are
-        // copied out before free.
+    /// The trust-relevant facts of `uid`'s primary graphical (display) session,
+    /// or None if the user has none (or sd-login errors). Binding to the uid's
+    /// display session — rather than the agent process's own session — lets the
+    /// agent run as a systemd user service, which lives outside the logind
+    /// session scope. Frees all libsystemd-allocated strings.
+    pub fn session_of_uid(uid: u32) -> Option<super::SessionInfo> {
+        // SAFETY: FFI to libsystemd; the out-pointer is freed below; the type
+        // string is copied out before free.
         unsafe {
             let mut session: *mut c_char = std::ptr::null_mut();
-            if sd_pid_get_session(pid as pid_t, &mut session) < 0 || session.is_null() {
+            if sd_uid_get_display(uid as uid_t, &mut session) < 0 || session.is_null() {
                 return None;
             }
             let active = sd_session_is_active(session) > 0;
-
-            let mut uid: uid_t = 0;
-            let uid_ok = sd_session_get_uid(session, &mut uid) >= 0;
 
             let mut type_ptr: *mut c_char = std::ptr::null_mut();
             let kind = if sd_session_get_type(session, &mut type_ptr) >= 0 && !type_ptr.is_null() {
@@ -126,19 +128,13 @@ mod sd {
             };
 
             free(session as *mut c_void);
-            if !uid_ok {
-                return None;
-            }
-            Some(super::SessionInfo {
-                active,
-                kind,
-                uid: uid as u32,
-            })
+            // By construction this is `uid`'s own display session.
+            Some(super::SessionInfo { active, kind, uid })
         }
     }
 }
 #[cfg(feature = "session-hardening")]
-pub use sd::session_of;
+pub use sd::session_of_uid;
 
 #[cfg(all(test, feature = "session-hardening"))]
 mod tests {

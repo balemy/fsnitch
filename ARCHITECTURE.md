@@ -70,9 +70,9 @@ credentials (`SO_PEERCRED`) to assign a role: **uid 0** gets the control plane
 The registering agent is pinned via `SO_PEERPIDFD` (falling back to the
 `SO_PEERCRED` pid on kernels < 6.5) so a reused pid can't be swapped in, and the
 daemon verifies the peer is running the configured `agent` binary. With
-`--features session-hardening` it additionally requires the agent to be in the
-uid's active graphical logind session. See [SECURITY.md](SECURITY.md) for what
-these checks do and don't prove.
+`--features session-hardening` it additionally requires the agent's uid to have
+an active graphical logind session. See [SECURITY.md](SECURITY.md) for what these
+checks do and don't prove.
 
 ## The agent
 

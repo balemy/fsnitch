@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1 — Unreleased
+
+- Fixed: with `session-hardening`, the prompt agent can now run as a systemd
+  user service. The active-graphical-session check binds to the user's logind
+  seat (via `sd_uid_get_display`) instead of the agent process's own session,
+  which a user-manager service is never part of.
+
 ## 0.5.0 — 2026-07-12
 
 First release.

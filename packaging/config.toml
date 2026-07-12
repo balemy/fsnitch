@@ -7,10 +7,10 @@
 # /etc/fsnitch/paths.d/*.toml).
 
 [general]
-# Only an agent running in the same user's ACTIVE GRAPHICAL logind session may
-# answer prompts.  This package is built with the `session-hardening` feature,
-# so this is enforced.  Set to false on headless systems (or use a build
-# without the feature).
+# Prompts are answered only while the agent's user has an ACTIVE GRAPHICAL
+# logind session (so the agent works as a systemd user service).  This package
+# is built with the `session-hardening` feature, so this is enforced.  Set to
+# false on headless systems (or use a build without the feature).
 require_agent_session = true
 
 # Defaults shown for reference — uncomment to change:
