@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install toolchain and libraries
+        run: pacman -Syu --noconfirm git base-devel rust systemd gtk4 gtk4-layer-shell
+      - uses: actions/checkout@v4
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Build hardened daemon
+        run: cargo build -p fsnitchd --features session-hardening

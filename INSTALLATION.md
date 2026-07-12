@@ -68,8 +68,16 @@ feature; leaving it `true` just logs a startup warning).
 
 Prebuilt binaries are attached to each [GitHub
 Release](https://github.com/balemy/fsnitch/releases) once 1.0 ships. Download
-the archive, unpack it, and run the bundled `install-local.sh` — same layout as
-the manual build above.
+the archive, unpack it, and run the bundled installer:
+
+```sh
+tar xf fsnitch-1.0.0-x86_64-linux.tar.zst
+cd fsnitch-1.0.0-x86_64-linux
+sudo ./install.sh
+```
+
+It installs the binaries, units, and default config, then enables the daemon
+(the same end state as the manual build).
 
 ## Enable and protect paths
 

@@ -11,7 +11,7 @@ makedepends=('cargo')
 backup=('etc/fsnitch/config.toml')
 install="$pkgname.install"
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')  # replace with the real checksum at release (step 4)
+sha256sums=('SKIP')  # replace with the real checksum once the v1.0.0 tag exists
 
 prepare() {
     cd "$pkgname-$pkgver"

@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install toolchain and libraries
+        run: pacman -Syu --noconfirm git base-devel rust systemd gtk4 gtk4-layer-shell
+      - uses: actions/checkout@v4
+      - name: Build release binaries
+        run: |
+          cargo build --release -p fsnitchd --features session-hardening
+          cargo build --release -p fsnitch-cli -p fsnitch-agent
+      - name: Assemble binary package
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          pkg="fsnitch-${ver}-x86_64-linux"
+          mkdir -p "$pkg"
+          cp target/release/fsnitchd target/release/fsnitch target/release/fsnitch-agent "$pkg/"
+          cp packaging/fsnitchd.service packaging/fsnitch-agent.service packaging/config.toml "$pkg/"
+          cp packaging/install-package.sh "$pkg/install.sh"
+          cp README.md INSTALLATION.md USAGE.md CONFIGURATION.md SECURITY.md LICENSE "$pkg/"
+          tar -caf "${pkg}.tar.zst" "$pkg"
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.tar.zst'
+          generate_release_notes: true
