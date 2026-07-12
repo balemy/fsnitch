@@ -37,9 +37,10 @@ else
     echo "    /etc/fsnitch/config.toml exists — left untouched"
 fi
 
-echo "==> enabling the daemon (sudo)"
+echo "==> enabling and (re)starting the daemon (sudo)"
 sudo systemctl daemon-reload
-sudo systemctl enable --now fsnitchd
+sudo systemctl enable fsnitchd
+sudo systemctl restart fsnitchd   # picks up the new binary on re-install too
 
 cat <<EOF
 
