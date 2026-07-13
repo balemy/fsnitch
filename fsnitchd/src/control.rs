@@ -109,9 +109,9 @@ fn handle_request(
             roots: snapshot.rules.roots().to_vec(),
             log_file: snapshot.config.general.log_file.clone(),
             config_dir: state.config_dir().to_path_buf(),
-            degraded_roots: snapshot
-                .inode_index
-                .degraded_roots()
+            degraded_roots: state
+                .inode_index()
+                .with(|i| i.degraded_roots())
                 .into_iter()
                 .map(PathBuf::from)
                 .collect(),

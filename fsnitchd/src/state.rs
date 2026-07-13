@@ -1,14 +1,16 @@
 //! Shared daemon state: config + compiled paths, atomically reloadable.
 
 use crate::hashing::PinHashes;
+use crate::inode_watch::{Cmd, LiveInodeIndex};
 use anyhow::Context;
 use fsnitch_core::config::{Config, PathPolicy};
-use fsnitch_core::inode_index::{self, InodeIndex};
+use fsnitch_core::inode_index::InodeIndex;
 use fsnitch_core::managed::ManagedPaths;
 use fsnitch_core::remembered::RememberedStore;
 use fsnitch_core::rules::CompiledPaths;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Outcome of `update_managed_path`.
@@ -24,9 +26,6 @@ pub struct Snapshot {
     pub remembered: RememberedStore,
     /// sha256 of pinned programs, hashed at load; verified by `stat` at event time.
     pub pin_hashes: Arc<PinHashes>,
-    /// (dev,ino) -> protected root, for recognizing files moved out of a root
-    /// (same-filesystem rename preserves the inode). Rebuilt on every reload.
-    pub inode_index: Arc<InodeIndex>,
     /// Protected paths from the CLI-managed drop-in (`list` source column,
     /// unprotect/allow/deny errors). Path is the identity, so this is an exact
     /// set of the managed drop-in's `path`s.
@@ -54,15 +53,25 @@ pub struct State {
     /// interleave and lose updates. The `inner` RwLock only guards the (fast)
     /// pointer swap; hot-path readers via `snapshot()` never wait on this.
     write_lock: Mutex<()>,
+    /// (dev,ino) -> protected root, kept fresh by the inotify watcher; read by
+    /// the enforcement loop to recognize files moved out of a root.
+    inode_index: LiveInodeIndex,
+    /// Sender to the watcher thread, registered by `main` after spawning it.
+    /// Root-changing snapshot swaps signal a re-seed through it.
+    watcher_tx: Mutex<Option<Sender<Cmd>>>,
 }
 
 impl State {
     pub fn load(config_dir: &Path) -> anyhow::Result<State> {
         let snapshot = Self::build_snapshot(config_dir)?;
+        let cap = snapshot.config.general.max_tracked_inodes;
         Ok(State {
             config_dir: config_dir.to_path_buf(),
             inner: RwLock::new(Arc::new(snapshot)),
             write_lock: Mutex::new(()),
+            // Seeded by the watcher (`Watcher::spawn`) before enforcement starts.
+            inode_index: LiveInodeIndex::new(InodeIndex::new(cap)),
+            watcher_tx: Mutex::new(None),
         })
     }
 
@@ -72,6 +81,8 @@ impl State {
         let _guard = self.write_lock.lock().unwrap();
         let snapshot = Self::build_snapshot(&self.config_dir)?;
         *self.inner.write().unwrap() = Arc::new(snapshot);
+        drop(_guard);
+        self.trigger_reseed();
         Ok(())
     }
 
@@ -81,6 +92,29 @@ impl State {
 
     pub fn config_dir(&self) -> &std::path::Path {
         &self.config_dir
+    }
+
+    /// A cheap handle to the live inode index (an `Arc` clone), for the
+    /// enforcement loop and status.
+    pub fn inode_index(&self) -> LiveInodeIndex {
+        self.inode_index.clone()
+    }
+
+    /// Register the watcher's command channel (called once by `main`).
+    pub fn set_watcher_tx(&self, tx: Sender<Cmd>) {
+        *self.watcher_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// Ask the watcher to rescan + re-watch the current roots. Called after a
+    /// change that may have altered the protected-root set. No-op before the
+    /// watcher registers (i.e. during initial load, when it seeds directly).
+    fn trigger_reseed(&self) {
+        if let Some(tx) = self.watcher_tx.lock().unwrap().as_ref() {
+            let snap = self.snapshot();
+            let roots = snap.rules.roots().to_vec();
+            let cap = snap.config.general.max_tracked_inodes;
+            let _ = tx.send(Cmd::Reseed(roots, cap));
+        }
     }
 
     /// Persist a "forever" verdict to the remembered overlay and publish a new
@@ -98,7 +132,6 @@ impl State {
             rules: current.rules.clone(),
             remembered,
             pin_hashes: current.pin_hashes.clone(),
-            inode_index: current.inode_index.clone(),
             managed_paths: current.managed_paths.clone(),
         };
         *self.inner.write().unwrap() = Arc::new(new_snapshot);
@@ -118,7 +151,6 @@ impl State {
                 rules: current.rules.clone(),
                 remembered,
                 pin_hashes: current.pin_hashes.clone(),
-                inode_index: current.inode_index.clone(),
                 managed_paths: current.managed_paths.clone(),
             };
             *self.inner.write().unwrap() = Arc::new(new_snapshot);
@@ -135,7 +167,10 @@ impl State {
         let mut managed = ManagedPaths::load(&file)?;
         managed.add(policy)?;
         managed.save()?;
-        self.swap_or_revert(&file, before)
+        self.swap_or_revert(&file, before)?;
+        drop(_guard);
+        self.trigger_reseed();
+        Ok(())
     }
 
     /// Remove the CLI-managed policy whose path equals `path`. Returns the
@@ -162,11 +197,12 @@ impl State {
                 rules: current.rules.clone(),
                 remembered,
                 pin_hashes: current.pin_hashes.clone(),
-                inode_index: current.inode_index.clone(),
                 managed_paths: current.managed_paths.clone(),
             };
             *self.inner.write().unwrap() = Arc::new(new_snapshot);
         }
+        drop(_guard);
+        self.trigger_reseed();
         Ok(Some(removed.path))
     }
 
@@ -279,25 +315,11 @@ impl State {
             .paths()
             .map(str::to_string)
             .collect();
-        // Index the inodes of every regular file under a protected root, so a
-        // file moved out of its root (same-fs rename keeps the inode) is still
-        // recognized. A root that exceeds the cap keeps path protection but
-        // loses move protection — warn loudly; status surfaces it too.
-        let inode_index = inode_index::scan_roots(rules.roots(), config.general.max_tracked_inodes);
-        for root in inode_index.degraded_roots() {
-            tracing::warn!(
-                root = %root,
-                cap = config.general.max_tracked_inodes,
-                "inode index cap exceeded — move protection OFF for this root (path \
-                 protection unchanged); raise general.max_tracked_inodes to restore it"
-            );
-        }
         Ok(Snapshot {
             config,
             rules: Arc::new(rules),
             remembered,
             pin_hashes: Arc::new(pin_hashes),
-            inode_index: Arc::new(inode_index),
             managed_paths,
         })
     }
@@ -346,31 +368,6 @@ mod tests {
             allow: vec![],
             deny: vec![],
         }
-    }
-
-    #[test]
-    fn snapshot_indexes_existing_files_under_roots() {
-        use std::os::unix::fs::MetadataExt;
-        let dir = tempfile::tempdir().unwrap();
-        let vault = dir.path().join("vault");
-        std::fs::create_dir_all(&vault).unwrap();
-        let f = vault.join("a.kdbx");
-        std::fs::write(&f, "x").unwrap();
-        write_config(
-            dir.path(),
-            &format!(
-                "[[path]]\npath = \"{}\"\nmode = \"block\"\n",
-                vault.display()
-            ),
-        );
-        let state = State::load(dir.path()).unwrap();
-        let snap = state.snapshot();
-        let md = std::fs::metadata(&f).unwrap();
-        // The file is recognized by inode even though we query a foreign path.
-        assert!(snap
-            .rules
-            .policy_for_inode(&snap.inode_index, md.dev(), md.ino())
-            .is_some());
     }
 
     #[test]

@@ -5,7 +5,9 @@
 - Added: same-filesystem move protection. The daemon indexes the `(dev, ino)`
   of every regular file under a protected root, so a secret renamed out of its
   root and read elsewhere on the same filesystem is still gated (previously a
-  `mv` out of the root bypassed the policy). Hardlinks are covered too.
+  `mv` out of the root bypassed the policy). Hardlinks are covered too. The
+  index is scanned at load/reload and kept fresh by an inotify watcher, so
+  files created under a root after startup are tracked as well.
 - Added: `general.max_tracked_inodes` (default 1000000) caps the inode index.
   A root that exceeds it keeps path protection but loses move protection, logs
   a warning, and is listed by `fsnitch status`.

@@ -5,6 +5,7 @@ mod control;
 mod engine;
 mod fanotify;
 mod hashing;
+mod inode_watch;
 mod procinfo;
 mod prompt;
 mod snooze;
@@ -163,6 +164,19 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Live inode index: keeps the (dev,ino) -> root map fresh so a file moved
+    // out of a root (same-fs rename preserves the inode) is still recognized.
+    // `spawn` seeds it synchronously from the current roots before returning,
+    // so enforcement below never runs against an unpopulated index.
+    let live_index = state.inode_index();
+    let watcher = inode_watch::spawn(
+        snapshot.rules.roots().to_vec(),
+        live_index.clone(),
+        snapshot.config.general.max_tracked_inodes,
+    )
+    .context("starting inode watcher")?;
+    state.set_watcher_tx(watcher.tx());
+
     tracing::info!("enforcement active");
     let own_pid = std::process::id() as i32;
     loop {
@@ -205,20 +219,24 @@ fn main() -> anyhow::Result<()> {
                 continue;
             };
 
-            match engine::decide_event(
-                &snapshot.rules,
-                &snapshot.config.general,
-                &snapshot.remembered,
-                &snoozes,
-                &snapshot.pin_hashes,
-                &snapshot.inode_index,
-                path,
-                event.dev,
-                event.ino,
-                event.exe.as_deref(),
-                event.pid,
-                event.uid,
-            ) {
+            // Read the live inode index for the duration of the decision.
+            let decision = live_index.with(|index| {
+                engine::decide_event(
+                    &snapshot.rules,
+                    &snapshot.config.general,
+                    &snapshot.remembered,
+                    &snoozes,
+                    &snapshot.pin_hashes,
+                    index,
+                    path,
+                    event.dev,
+                    event.ino,
+                    event.exe.as_deref(),
+                    event.pid,
+                    event.uid,
+                )
+            });
+            match decision {
                 engine::Decision::Resolved(dec) => {
                     if let Some(record) = &dec.record {
                         log_record(&log, record);

@@ -59,10 +59,14 @@ against:
   verdict falls back to the file's inode identity `(dev, ino)`, so moving a
   secret elsewhere on the same filesystem and reading it there is still gated
   (hardlinks likewise). The inode set is built by scanning each root at
-  load/reload. Still out of scope: delete; cross-filesystem move (a copy whose
-  source read is already gated, landing on a new inode); a file *created* under
-  a root after the last scan, until the next reload; and any root that exceeded
-  `max_tracked_inodes` (it falls back to path-only — see `fsnitch status`).
+  load/reload and kept fresh by an inotify watcher, so files *created* under a
+  root after startup are tracked too. Still out of scope: delete;
+  cross-filesystem move (a copy whose source read is already gated, landing on
+  a new inode); the narrow race between a file being created-and-moved and the
+  watcher indexing it (fanotify has no `CREATE_PERM`); the brief window after a
+  reload or `protect` before the watcher re-seeds the new roots; and any root
+  that exceeded `max_tracked_inodes` (it falls back to path-only — see
+  `fsnitch status`).
 - **Multi-user / multi-seat desktops.** The design assumes a single interactive
   user; prompts route to the one registered agent per uid.
 - **Signature or behavioural malware scanning.** fsnitch is policy, not
