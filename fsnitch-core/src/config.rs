@@ -62,6 +62,8 @@ pub struct General {
     pub max_pending: usize,
     #[serde(default = "default_require_agent_session")]
     pub require_agent_session: bool,
+    #[serde(default = "default_max_tracked_inodes")]
+    pub max_tracked_inodes: usize,
 }
 
 fn default_timeout() -> u64 {
@@ -82,6 +84,9 @@ fn default_max_pending() -> usize {
 fn default_require_agent_session() -> bool {
     true
 }
+fn default_max_tracked_inodes() -> usize {
+    1_000_000
+}
 
 impl Default for General {
     fn default() -> Self {
@@ -93,6 +98,7 @@ impl Default for General {
             agent: default_agent(),
             max_pending: default_max_pending(),
             require_agent_session: default_require_agent_session(),
+            max_tracked_inodes: default_max_tracked_inodes(),
         }
     }
 }
@@ -391,6 +397,16 @@ mod tests {
         .unwrap();
         let cfg = Config::parse_str(&text).unwrap();
         assert_eq!(cfg.paths, vec![policy]);
+    }
+
+    #[test]
+    fn max_tracked_inodes_default_and_parse() {
+        assert_eq!(
+            Config::parse_str("").unwrap().general.max_tracked_inodes,
+            1_000_000
+        );
+        let cfg = Config::parse_str("[general]\nmax_tracked_inodes = 42\n").unwrap();
+        assert_eq!(cfg.general.max_tracked_inodes, 42);
     }
 
     #[test]

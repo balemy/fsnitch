@@ -34,6 +34,7 @@ log_file              = "/var/log/fsnitch/events.jsonl" # JSON-lines event log
 agent                 = "/usr/bin/fsnitch-agent"        # binary a peer must run to register as the prompt agent
 max_pending           = 128                             # cap on concurrently parked prompts
 require_agent_session = true                            # require the agent in the uid's active graphical session
+max_tracked_inodes    = 1000000                         # cap on the inode index used for move protection
 ```
 
 - **`timeout`** — how long an `ask`-mode open is held waiting for the agent
@@ -55,6 +56,13 @@ require_agent_session = true                            # require the agent in t
   with `--features session-hardening`; on the default lightweight build it is
   logged as an ineffective warning at startup. Set it to `false` for headless,
   CI, or dev setups. See [SECURITY.md](SECURITY.md#control-plane-and-agent-trust).
+- **`max_tracked_inodes`** — bounds the inode index that backs same-filesystem
+  move protection (the daemon records the `(dev, ino)` of every regular file
+  under each protected root so a file renamed out of its root is still gated).
+  A root whose file count would exceed this cap keeps its **path** protection
+  but loses **move** protection; the daemon logs a warning at load/reload and
+  `fsnitch status` lists the degraded roots. Raise it to re-cover a large root
+  (roughly 24 bytes of memory per tracked inode).
 
 ## `[[path]]` — a protected path and its policy
 

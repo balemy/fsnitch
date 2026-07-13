@@ -2,6 +2,7 @@
 //! and everything beneath it; the most-specific (longest) match wins.
 
 use crate::config::{Config, PathPolicy};
+use crate::inode_index::InodeIndex;
 use std::path::{Path, PathBuf};
 
 pub struct CompiledPaths {
@@ -32,6 +33,16 @@ impl CompiledPaths {
             .iter()
             .filter(|p| path.starts_with(&p.path))
             .max_by_key(|p| Path::new(&p.path).components().count())
+    }
+
+    /// Policy for a file identified by inode rather than path — used as a
+    /// fallback when `policy_for` misses because the file was renamed out of
+    /// its root (a same-filesystem move preserves the inode). Resolves the
+    /// tracked root string back through `policy_for`, so nested-root tie-break
+    /// stays identical and a root removed by a reload yields `None`.
+    pub fn policy_for_inode(&self, index: &InodeIndex, dev: u64, ino: u64) -> Option<&PathPolicy> {
+        let root = index.root_for(dev, ino)?;
+        self.policy_for(Path::new(root))
     }
 }
 
@@ -105,6 +116,20 @@ mod tests {
         assert!(paths
             .policy_for(Path::new("/home/luke/vaultsfake/x"))
             .is_none());
+    }
+
+    #[test]
+    fn policy_for_inode_maps_to_root_policy() {
+        use crate::inode_index::InodeIndex;
+        let paths = compile(CFG);
+        let mut idx = InodeIndex::new(100);
+        let r = idx.add_root("/home/luke/vaults");
+        idx.try_insert(66, 42, r);
+        // A path outside every root, but its inode is tracked under /home/luke/vaults.
+        let pol = paths.policy_for_inode(&idx, 66, 42).unwrap();
+        assert_eq!(pol.path, "/home/luke/vaults");
+        // Unknown inode -> None.
+        assert!(paths.policy_for_inode(&idx, 66, 43).is_none());
     }
 
     #[test]

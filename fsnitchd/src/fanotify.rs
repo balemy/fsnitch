@@ -71,6 +71,7 @@ impl EnforcementBackend for FanotifyBackend {
             let pid = event.pid();
             let raw = fd.as_raw_fd();
             let path = procinfo::path_of_fd(raw);
+            let (dev, ino) = procinfo::stat_fd(raw).unwrap_or((0, 0));
             let exe = procinfo::exe_of(pid);
             let uid = procinfo::uid_of(pid);
 
@@ -94,6 +95,8 @@ impl EnforcementBackend for FanotifyBackend {
                 pid,
                 exe,
                 uid,
+                dev,
+                ino,
             });
         }
         Ok(out)

@@ -3,6 +3,7 @@
 use crate::hashing::PinHashes;
 use anyhow::Context;
 use fsnitch_core::config::{Config, PathPolicy};
+use fsnitch_core::inode_index::{self, InodeIndex};
 use fsnitch_core::managed::ManagedPaths;
 use fsnitch_core::remembered::RememberedStore;
 use fsnitch_core::rules::CompiledPaths;
@@ -23,6 +24,9 @@ pub struct Snapshot {
     pub remembered: RememberedStore,
     /// sha256 of pinned programs, hashed at load; verified by `stat` at event time.
     pub pin_hashes: Arc<PinHashes>,
+    /// (dev,ino) -> protected root, for recognizing files moved out of a root
+    /// (same-filesystem rename preserves the inode). Rebuilt on every reload.
+    pub inode_index: Arc<InodeIndex>,
     /// Protected paths from the CLI-managed drop-in (`list` source column,
     /// unprotect/allow/deny errors). Path is the identity, so this is an exact
     /// set of the managed drop-in's `path`s.
@@ -94,6 +98,7 @@ impl State {
             rules: current.rules.clone(),
             remembered,
             pin_hashes: current.pin_hashes.clone(),
+            inode_index: current.inode_index.clone(),
             managed_paths: current.managed_paths.clone(),
         };
         *self.inner.write().unwrap() = Arc::new(new_snapshot);
@@ -113,6 +118,7 @@ impl State {
                 rules: current.rules.clone(),
                 remembered,
                 pin_hashes: current.pin_hashes.clone(),
+                inode_index: current.inode_index.clone(),
                 managed_paths: current.managed_paths.clone(),
             };
             *self.inner.write().unwrap() = Arc::new(new_snapshot);
@@ -156,6 +162,7 @@ impl State {
                 rules: current.rules.clone(),
                 remembered,
                 pin_hashes: current.pin_hashes.clone(),
+                inode_index: current.inode_index.clone(),
                 managed_paths: current.managed_paths.clone(),
             };
             *self.inner.write().unwrap() = Arc::new(new_snapshot);
@@ -272,11 +279,25 @@ impl State {
             .paths()
             .map(str::to_string)
             .collect();
+        // Index the inodes of every regular file under a protected root, so a
+        // file moved out of its root (same-fs rename keeps the inode) is still
+        // recognized. A root that exceeds the cap keeps path protection but
+        // loses move protection — warn loudly; status surfaces it too.
+        let inode_index = inode_index::scan_roots(rules.roots(), config.general.max_tracked_inodes);
+        for root in inode_index.degraded_roots() {
+            tracing::warn!(
+                root = %root,
+                cap = config.general.max_tracked_inodes,
+                "inode index cap exceeded — move protection OFF for this root (path \
+                 protection unchanged); raise general.max_tracked_inodes to restore it"
+            );
+        }
         Ok(Snapshot {
             config,
             rules: Arc::new(rules),
             remembered,
             pin_hashes: Arc::new(pin_hashes),
+            inode_index: Arc::new(inode_index),
             managed_paths,
         })
     }
@@ -325,6 +346,31 @@ mod tests {
             allow: vec![],
             deny: vec![],
         }
+    }
+
+    #[test]
+    fn snapshot_indexes_existing_files_under_roots() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let f = vault.join("a.kdbx");
+        std::fs::write(&f, "x").unwrap();
+        write_config(
+            dir.path(),
+            &format!(
+                "[[path]]\npath = \"{}\"\nmode = \"block\"\n",
+                vault.display()
+            ),
+        );
+        let state = State::load(dir.path()).unwrap();
+        let snap = state.snapshot();
+        let md = std::fs::metadata(&f).unwrap();
+        // The file is recognized by inode even though we query a foreign path.
+        assert!(snap
+            .rules
+            .policy_for_inode(&snap.inode_index, md.dev(), md.ino())
+            .is_some());
     }
 
     #[test]

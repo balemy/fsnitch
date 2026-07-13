@@ -13,6 +13,10 @@ pub struct AccessEvent {
     pub pid: i32,
     pub exe: Option<PathBuf>,
     pub uid: Option<u32>,
+    /// `(st_dev, st_ino)` of the target, for inode-identity matching. `(0, 0)`
+    /// if the stat failed (won't match any real tracked inode).
+    pub dev: u64,
+    pub ino: u64,
 }
 
 pub trait EnforcementBackend: Send + Sync {

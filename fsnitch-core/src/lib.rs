@@ -1,6 +1,7 @@
 pub mod config;
 pub mod decision;
 pub mod eventlog;
+pub mod inode_index;
 pub mod managed;
 pub mod pathutil;
 pub mod presets;

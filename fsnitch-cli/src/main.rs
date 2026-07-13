@@ -486,11 +486,24 @@ fn overview(socket: &Path) -> anyhow::Result<()> {
             roots: _,
             log_file,
             config_dir,
+            degraded_roots,
         } => {
             print!(
                 "{}",
                 output::render_banner_live(&version, paths, &config_dir)
             );
+            if !degraded_roots.is_empty() {
+                println!();
+                println!(
+                    "{}  {}",
+                    style::bold("move-protection DEGRADED (inode cap):"),
+                    degraded_roots
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             log_file
         }
         other => fail(other),

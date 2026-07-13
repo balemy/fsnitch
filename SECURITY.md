@@ -53,8 +53,16 @@ against:
   `gdb` against a process running an allowlisted binary lets an attacker read
   the file through a trusted identity. Set `kernel.yama.ptrace_scope = 1` to
   raise the bar.
-- **Delete and rename.** fanotify cannot block these as permission events, so
-  fsnitch gates opens (read/write), not unlink/rename.
+- **Delete and cross-filesystem move.** fanotify cannot block these as
+  permission events, so fsnitch gates opens (read/write), not unlink/rename.
+  A *same-filesystem* rename out of a protected path **is** covered: the open
+  verdict falls back to the file's inode identity `(dev, ino)`, so moving a
+  secret elsewhere on the same filesystem and reading it there is still gated
+  (hardlinks likewise). The inode set is built by scanning each root at
+  load/reload. Still out of scope: delete; cross-filesystem move (a copy whose
+  source read is already gated, landing on a new inode); a file *created* under
+  a root after the last scan, until the next reload; and any root that exceeded
+  `max_tracked_inodes` (it falls back to path-only — see `fsnitch status`).
 - **Multi-user / multi-seat desktops.** The design assumes a single interactive
   user; prompts route to the one registered agent per uid.
 - **Signature or behavioural malware scanning.** fsnitch is policy, not

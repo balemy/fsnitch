@@ -134,6 +134,10 @@ pub enum Response {
         roots: Vec<PathBuf>,
         log_file: PathBuf,
         config_dir: PathBuf,
+        /// Roots whose inode index exceeded `max_tracked_inodes` — move
+        /// protection is off for them (path protection unchanged).
+        #[serde(default)]
+        degraded_roots: Vec<PathBuf>,
     },
     Paths {
         paths: Vec<PathSummary>,
@@ -297,6 +301,7 @@ mod tests {
             roots: vec!["/home/luke/vaults".into()],
             log_file: "/var/log/fsnitch/events.jsonl".into(),
             config_dir: "/etc/fsnitch".into(),
+            degraded_roots: vec!["/big".into()],
         };
         let mut buf = Vec::new();
         write_msg(&mut buf, &resp).unwrap();

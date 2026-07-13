@@ -19,6 +19,19 @@ pub fn path_of_fd(fd: i32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()
 }
 
+/// `(st_dev, st_ino)` of an open fd (the fanotify event target). None if the
+/// stat fails. Used for inode-identity matching when the path no longer
+/// resolves under a protected root.
+pub fn stat_fd(fd: i32) -> Option<(u64, u64)> {
+    use std::os::fd::BorrowedFd;
+    // SAFETY: `fd` is a live descriptor owned by the caller for the duration of
+    // this call; BorrowedFd does not take ownership and is dropped before the
+    // caller closes the fd.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let st = nix::sys::stat::fstat(borrowed).ok()?;
+    Some((st.st_dev as u64, st.st_ino as u64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,6 +57,16 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let path = path_of_fd(file.as_file().as_raw_fd()).unwrap();
         assert_eq!(path, file.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn stat_fd_matches_metadata() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let (dev, ino) = stat_fd(file.as_file().as_raw_fd()).unwrap();
+        let md = std::fs::metadata(file.path()).unwrap();
+        assert_eq!((dev, ino), (md.dev(), md.ino()));
     }
 
     #[test]

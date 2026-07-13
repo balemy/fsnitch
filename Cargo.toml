@@ -3,6 +3,6 @@ resolver = "2"
 members = ["fsnitch-core", "fsnitchd", "fsnitch-cli", "fsnitch-mock-agent", "fsnitch-agent"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
