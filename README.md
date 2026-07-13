@@ -1,17 +1,20 @@
 # fsnitch
 
-Interactive file-access guard for the Linux desktop — the OpenSnitch idea,
-applied to files.
+Interactive file-access guard for the Linux desktop.
 
-A small root daemon watches the paths you declare sensitive — password vaults,
-browser profiles, crypto wallets, SSH keys — and gates every `open()` on them.
-Programs you've allowlisted pass; anything else is denied silently, allowed but
-logged, or pops an interactive **allow / deny** prompt. It's built to stop the
-common infostealer pattern: some unprivileged program quietly reading your
-secrets and shipping them off.
+## What it does
 
-A protected **path** covers itself and everything beneath it; when paths nest,
-the most specific one wins.
+fsnitch watches the files you care about most and lets only the programs you
+trust open them:
+
+- **You choose what to protect** — password vaults, browser profiles, crypto
+  wallets, SSH keys, or any file or folder you name.
+- **You decide who gets in** — when a program you haven't approved tries to open
+  a protected file, you get a simple **allow / deny** prompt.
+- **It remembers your choices** — trusted programs keep working without asking
+  again; everything else is kept out.
+- **It stops silent data theft** — the common trick where a program quietly
+  reads your secrets and ships them off is blocked before it happens.
 
 ## What it is not
 
