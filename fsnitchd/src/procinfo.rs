@@ -32,6 +32,19 @@ pub fn stat_fd(fd: i32) -> Option<(u64, u64)> {
     Some((st.st_dev as u64, st.st_ino as u64))
 }
 
+/// Birth time of an open fd, if the filesystem reports one. Compared against
+/// the birth time captured at index time to unmask recycled inode numbers.
+/// Reads only the already-open fd — no path re-open (an event-time open on the
+/// marked filesystem would deadlock the enforcement loop).
+pub fn btime_fd(fd: i32) -> Option<std::time::SystemTime> {
+    use std::mem::ManuallyDrop;
+    use std::os::fd::FromRawFd;
+    // SAFETY: `fd` is a live descriptor owned by the caller for the duration of
+    // this call; ManuallyDrop keeps the temporary File from closing it.
+    let file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    file.metadata().ok().and_then(|md| md.created().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

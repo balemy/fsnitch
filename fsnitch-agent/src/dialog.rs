@@ -125,7 +125,7 @@ pub fn run_dialog(req: PromptRequest) -> Option<Verdict> {
 
 fn build_ui(app: &gtk::Application, req: &PromptRequest, result: Rc<Cell<Option<Verdict>>>) {
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(CSS);
+    provider.load_from_string(CSS);
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,

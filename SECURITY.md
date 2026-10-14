@@ -95,6 +95,16 @@ startup. Honest limit: a human still answers the dialog either way — session
 binding narrows *who may register* as the agent to the live graphical seat, it
 does not prove the agent process itself is not malicious.
 
+**Read-only status socket.** A second socket, `/run/fsnitch/status.sock`
+(also 0666), serves the tray/GUI as a normal user. It answers only `status`,
+`list`, `verdicts` and `events`; every other request is refused, so it cannot
+change policy. Per-user data is filtered by peer uid: a non-root peer sees only
+its own event-log records and pauses. Honest limit: the list of protected
+paths, their allow/deny programs and the remembered verdicts are visible to any
+local user — fsnitch treats *which* paths are guarded as non-secret. Changes
+from the GUI go through `pkexec fsnitch …`, i.e. through polkit
+authentication and the root control plane.
+
 ## Reporting a vulnerability
 
 Please report security issues **privately** — do not open a public issue.

@@ -11,7 +11,7 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install toolchain and libraries
-        run: pacman -Syu --noconfirm git base-devel rust systemd gtk4 gtk4-layer-shell
+        run: pacman -Syu --noconfirm git base-devel rust systemd gtk4 gtk4-layer-shell libadwaita
       - uses: actions/checkout@v4
       - name: Format
         run: cargo fmt --all -- --check

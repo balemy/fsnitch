@@ -25,6 +25,8 @@ fi
 as_user() { setpriv --reuid "$AGENT_UID" --regid "$AGENT_UID" --clear-groups "$@"; }
 
 WORK=$(mktemp -d)
+# Own socket path — never touch /run/fsnitch of an installed daemon.
+SOCK="$WORK/fsnitchd.sock"
 DAEMON_PID=""; AGENT_PID=""
 trap 'kill "$AGENT_PID" 2>/dev/null||true; kill "$DAEMON_PID" 2>/dev/null||true; rm -rf "$WORK"' EXIT
 
@@ -51,7 +53,7 @@ mode = "ask"
 EOF
 
 start_daemon() {
-    ./target/debug/fsnitchd --config "$WORK/etc" & DAEMON_PID=$!
+    ./target/debug/fsnitchd --config "$WORK/etc" --socket "$SOCK" & DAEMON_PID=$!
     sleep 1
     kill -0 "$DAEMON_PID" || { echo "FAIL: daemon died on startup"; exit 1; }
 }
@@ -63,7 +65,7 @@ grep -q '"source":"no_agent"' "$WORK/events.jsonl" || { echo "FAIL: no no_agent 
 echo "OK: denied with no agent"
 
 echo "--- agent replies allow-forever: access allowed and remembered"
-as_user "$MOCK" allow-forever & AGENT_PID=$!
+as_user "$MOCK" allow-forever --socket "$SOCK" & AGENT_PID=$!
 sleep 1
 as_user head -n1 "$WORK/protected/secret.txt" >/dev/null || { echo "FAIL: allow-forever access blocked"; exit 1; }
 grep -q '"source":"prompt"' "$WORK/events.jsonl" || { echo "FAIL: no prompt-sourced event logged"; exit 1; }

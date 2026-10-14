@@ -39,6 +39,11 @@ impl AgentRegistry {
         self.agents.lock().unwrap().contains_key(&uid)
     }
 
+    /// Whether an agent is registered for any uid.
+    pub fn any(&self) -> bool {
+        !self.agents.lock().unwrap().is_empty()
+    }
+
     /// Send a message to the agent for `uid`. Returns false if none registered
     /// or the channel is closed.
     pub fn send(&self, uid: u32, msg: DaemonMsg) -> bool {

@@ -26,6 +26,8 @@ else
 fi
 
 WORK=$(mktemp -d)
+# Own socket path — never touch /run/fsnitch of an installed daemon.
+SOCK="$WORK/fsnitchd.sock"
 trap 'kill "$DAEMON_PID" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/protected" "$WORK/etc"
@@ -48,7 +50,7 @@ mode = "block"
 allow = [{ program = "$BASH_BIN" }]
 EOF
 
-./target/debug/fsnitchd --config "$WORK/etc" &
+./target/debug/fsnitchd --config "$WORK/etc" --socket "$SOCK" &
 DAEMON_PID=$!
 sleep 1
 kill -0 "$DAEMON_PID" || { echo "FAIL: daemon died on startup"; exit 1; }

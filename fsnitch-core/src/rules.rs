@@ -40,8 +40,14 @@ impl CompiledPaths {
     /// its root (a same-filesystem move preserves the inode). Resolves the
     /// tracked root string back through `policy_for`, so nested-root tie-break
     /// stays identical and a root removed by a reload yields `None`.
-    pub fn policy_for_inode(&self, index: &InodeIndex, dev: u64, ino: u64) -> Option<&PathPolicy> {
-        let root = index.root_for(dev, ino)?;
+    pub fn policy_for_inode(
+        &self,
+        index: &InodeIndex,
+        dev: u64,
+        ino: u64,
+        btime: Option<std::time::SystemTime>,
+    ) -> Option<&PathPolicy> {
+        let root = index.root_for(dev, ino, btime)?;
         self.policy_for(Path::new(root))
     }
 }
@@ -124,12 +130,12 @@ mod tests {
         let paths = compile(CFG);
         let mut idx = InodeIndex::new(100);
         let r = idx.add_root("/home/luke/vaults");
-        idx.try_insert(66, 42, r);
+        idx.try_insert(66, 42, r, None);
         // A path outside every root, but its inode is tracked under /home/luke/vaults.
-        let pol = paths.policy_for_inode(&idx, 66, 42).unwrap();
+        let pol = paths.policy_for_inode(&idx, 66, 42, None).unwrap();
         assert_eq!(pol.path, "/home/luke/vaults");
         // Unknown inode -> None.
-        assert!(paths.policy_for_inode(&idx, 66, 43).is_none());
+        assert!(paths.policy_for_inode(&idx, 66, 43, None).is_none());
     }
 
     #[test]

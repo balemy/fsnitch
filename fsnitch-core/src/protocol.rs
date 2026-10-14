@@ -1,6 +1,7 @@
 //! Control-plane IPC: JSON-lines over a Unix socket. M2 adds agent messages.
 
 use crate::config::Mode;
+use crate::eventlog::EventRecord;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -84,8 +85,13 @@ pub enum Request {
         path: PathBuf,
         program: Option<PathBuf>,
     },
+    /// The last `limit` event-log records (capped by the daemon). On the
+    /// read-only status socket a non-root peer only gets its own uid's records.
+    Events {
+        limit: usize,
+    },
 }
-// Note: there is no `Log` request — the CLI reads the log file directly, using
+// Note: there is no `Log` request for following — the CLI reads the log file directly, using
 // `Status.log_file` to locate it (as today).
 
 /// One protected path with its rendered policy (for `list`).
@@ -138,6 +144,10 @@ pub enum Response {
         /// protection is off for them (path protection unchanged).
         #[serde(default)]
         degraded_roots: Vec<PathBuf>,
+        /// Whether a prompt agent is connected — for the requesting uid on the
+        /// status socket, for any uid on the control socket.
+        #[serde(default)]
+        agent_connected: bool,
     },
     Paths {
         paths: Vec<PathSummary>,
@@ -162,6 +172,9 @@ pub enum Response {
     Forgotten {
         temporary: usize,
         remembered: usize,
+    },
+    Events {
+        events: Vec<EventRecord>,
     },
     Ok,
     Error {
@@ -302,6 +315,7 @@ mod tests {
             log_file: "/var/log/fsnitch/events.jsonl".into(),
             config_dir: "/etc/fsnitch".into(),
             degraded_roots: vec!["/big".into()],
+            agent_connected: true,
         };
         let mut buf = Vec::new();
         write_msg(&mut buf, &resp).unwrap();
@@ -371,6 +385,7 @@ mod tests {
                 path: "/home/u/vaults".into(),
                 program: Some("/usr/bin/cat".into()),
             },
+            Request::Events { limit: 5 },
         ];
         let mut buf = Vec::new();
         for r in &reqs {
@@ -404,6 +419,18 @@ mod tests {
             Response::Forgotten {
                 temporary: 1,
                 remembered: 2,
+            },
+            Response::Events {
+                events: vec![EventRecord {
+                    ts: "2026-10-14T12:00:00Z".into(),
+                    path: "/home/u/vaults".into(),
+                    file: "/home/u/vaults/a.kdbx".into(),
+                    program: Some("/usr/bin/cat".into()),
+                    pid: 7,
+                    uid: 1000,
+                    decision: "deny".into(),
+                    source: "policy".into(),
+                }],
             },
         ];
         let mut buf = Vec::new();

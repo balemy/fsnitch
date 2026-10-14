@@ -90,16 +90,18 @@ pub fn decide_event(
     path: &Path,
     dev: u64,
     ino: u64,
+    btime: Option<std::time::SystemTime>,
     program: Option<&Path>,
     pid: i32,
     uid: Option<u32>,
 ) -> Decision {
     // Path match first (the common case); on a miss, fall back to inode identity
     // so a file renamed out of its root (same-fs move preserves the inode) is
-    // still recognized.
+    // still recognized. The birth time guards the fallback against recycled
+    // inode numbers (an unrelated new file reusing a tracked inode's number).
     let Some(policy) = rules
         .policy_for(path)
-        .or_else(|| rules.policy_for_inode(index, dev, ino))
+        .or_else(|| rules.policy_for_inode(index, dev, ino, btime))
     else {
         return Decision::Resolved(EventDecision {
             allow: true,
@@ -201,6 +203,7 @@ mod tests {
             path,
             0,
             0,
+            None,
             program,
             pid,
             uid,
@@ -228,7 +231,7 @@ mod tests {
         let pins = PinHashes::default();
         let mut index = empty_index();
         let r = index.add_root("/vaults");
-        index.try_insert(66, 42, r); // the moved file's inode
+        index.try_insert(66, 42, r, None); // the moved file's inode
 
         // Path is now /tmp/leaked.kdbx (outside every root), but the inode is tracked.
         let d = super::decide_event(
@@ -241,6 +244,7 @@ mod tests {
             Path::new("/tmp/leaked.kdbx"),
             66,
             42,
+            None,
             Some(Path::new("/tmp/stealer")),
             1,
             Some(1000),
@@ -250,6 +254,41 @@ mod tests {
         };
         assert!(!dec.allow); // block policy of /vaults applies via inode identity
         assert_eq!(dec.record.unwrap().path, "/vaults");
+    }
+
+    #[test]
+    fn inode_fallback_skips_a_recycled_inode_number() {
+        use std::time::{Duration, SystemTime};
+        let (cfg, rules) = setup("block");
+        let overlay = RememberedStore::default();
+        let pins = PinHashes::default();
+        let mut index = empty_index();
+        let r = index.add_root("/vaults");
+        let born = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        index.try_insert(66, 42, r, Some(born));
+
+        // A tracked file was deleted and the kernel recycled its inode number
+        // for an unrelated new file (different birth time): no policy applies.
+        let d = super::decide_event(
+            &rules,
+            &cfg.general,
+            &overlay,
+            &SnoozeStore::default(),
+            &pins,
+            &index,
+            Path::new("/home/user/.cache/browser/cache_data"),
+            66,
+            42,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(2_000)),
+            Some(Path::new("/usr/lib/browser/browser")),
+            1,
+            Some(1000),
+        );
+        let Decision::Resolved(dec) = d else {
+            panic!("expected Resolved")
+        };
+        assert!(dec.allow);
+        assert!(dec.record.is_none());
     }
 
     #[test]
@@ -268,6 +307,7 @@ mod tests {
             Path::new("/tmp/whatever"),
             66,
             42,
+            None,
             Some(Path::new("/bin/cat")),
             1,
             Some(1000),

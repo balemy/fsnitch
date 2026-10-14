@@ -1,0 +1,14 @@
+[Unit]
+Description=fsnitch status tray and manager
+Documentation=https://github.com/balemy/fsnitch
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fsnitch-gui --background
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

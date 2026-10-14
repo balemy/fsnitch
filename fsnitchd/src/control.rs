@@ -1,5 +1,6 @@
 //! Control socket: JSON-lines request/response for the CLI (root-only control plane).
 
+use crate::agent::AgentRegistry;
 use crate::backend::EnforcementBackend;
 use crate::prompt::VerdictCache;
 use crate::snooze::SnoozeStore;
@@ -18,6 +19,32 @@ use std::sync::Arc;
 /// Default control-socket path; `fsnitchd --socket` overrides it (the socket dir
 /// is derived from this path in `main`).
 pub const SOCKET_PATH: &str = "/run/fsnitch/fsnitchd.sock";
+
+/// Bind the control socket without displacing a live daemon.
+///
+/// Unlinking the path while another fsnitchd still serves it would leave that
+/// daemon listening on an orphaned inode — enforcement keeps running but every
+/// new client gets ECONNREFUSED. So probe first: if something answers, refuse
+/// to start; only a dead leftover socket file is removed and rebound.
+pub fn claim_socket(path: &Path) -> anyhow::Result<UnixListener> {
+    use anyhow::Context as _;
+    match UnixStream::connect(path) {
+        Ok(_) => anyhow::bail!(
+            "{} is already served by a running fsnitchd — refusing to displace it \
+             (stop that daemon first, e.g. systemctl stop fsnitchd)",
+            path.display()
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))
+}
+
+/// Upper bound for `Request::Events` so a client can't make the daemon
+/// serialize an unbounded log.
+pub(crate) const MAX_EVENTS: usize = 1000;
 
 pub fn serve(listener: UnixListener, state: Arc<State>, rt: Arc<crate::agent::PromptRuntime>) {
     for stream in listener.incoming() {
@@ -38,8 +65,9 @@ pub fn serve(listener: UnixListener, state: Arc<State>, rt: Arc<crate::agent::Pr
                     let cache = rt.cache.clone();
                     let backend = rt.backend.clone();
                     let snoozes = rt.snoozes.clone();
+                    let registry = rt.registry.clone();
                     std::thread::spawn(move || {
-                        handle_connection(stream, &state, &cache, &backend, &snoozes)
+                        handle_connection(stream, &state, &cache, &backend, &snoozes, &registry)
                     });
                 } else {
                     // Agent role: prompt handler for this uid.
@@ -55,7 +83,7 @@ pub fn serve(listener: UnixListener, state: Arc<State>, rt: Arc<crate::agent::Pr
 }
 
 /// (uid, pid) of the connected peer via SO_PEERCRED.
-fn peer_cred(stream: &UnixStream) -> Option<(u32, i32)> {
+pub(crate) fn peer_cred(stream: &UnixStream) -> Option<(u32, i32)> {
     use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
     let creds = getsockopt(stream, PeerCredentials).ok()?;
     Some((creds.uid(), creds.pid()))
@@ -67,6 +95,7 @@ fn handle_connection(
     cache: &VerdictCache,
     backend: &Arc<dyn EnforcementBackend>,
     snoozes: &Arc<SnoozeStore>,
+    registry: &AgentRegistry,
 ) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
@@ -87,14 +116,36 @@ fn handle_connection(
                 return;
             }
         };
-        let resp = handle_request(req, state, cache, backend, snoozes);
+        let mut resp = handle_request(req, state, cache, backend, snoozes);
+        patch_agent_connected(&mut resp, registry.any());
         if write_msg(&mut writer, &resp).is_err() {
             return;
         }
     }
 }
 
-fn handle_request(
+/// `handle_request` has no view of the agent registry; the socket servers
+/// fill in `Status.agent_connected` from it afterwards.
+pub(crate) fn patch_agent_connected(resp: &mut Response, connected: bool) {
+    if let Response::Status {
+        agent_connected, ..
+    } = resp
+    {
+        *agent_connected = connected;
+    }
+}
+
+/// The last `limit` (capped) log records, optionally only `uid`'s.
+pub(crate) fn events_response(log: &Path, limit: usize, uid: Option<u32>) -> Response {
+    match fsnitch_core::eventlog::read_tail(log, limit.min(MAX_EVENTS), uid) {
+        Ok(events) => Response::Events { events },
+        Err(err) => Response::Error {
+            message: format!("reading {}: {err}", log.display()),
+        },
+    }
+}
+
+pub(crate) fn handle_request(
     req: Request,
     state: &State,
     cache: &VerdictCache,
@@ -115,7 +166,11 @@ fn handle_request(
                 .into_iter()
                 .map(PathBuf::from)
                 .collect(),
+            agent_connected: false,
         },
+        Request::Events { limit } => {
+            events_response(&snapshot.config.general.log_file, limit, None)
+        }
         Request::List => Response::Paths {
             paths: snapshot
                 .config
@@ -736,6 +791,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn claim_socket_refuses_to_displace_a_live_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ctl.sock");
+        let _live = UnixListener::bind(&sock).unwrap();
+
+        let err = claim_socket(&sock).expect_err("must refuse while a daemon still answers");
+        assert!(
+            err.to_string().contains("already"),
+            "unexpected error: {err}"
+        );
+        // The live daemon's socket file must be left untouched.
+        assert!(sock.exists());
+    }
+
+    #[test]
+    fn claim_socket_replaces_a_stale_socket_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ctl.sock");
+        // A dead daemon leaves its socket file behind; nobody answers on it.
+        drop(UnixListener::bind(&sock).unwrap());
+        assert!(sock.exists());
+
+        let _listener = claim_socket(&sock).unwrap();
+        UnixStream::connect(&sock).expect("fresh listener must answer");
+    }
+
+    #[test]
+    fn claim_socket_binds_a_fresh_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ctl.sock");
+
+        let _listener = claim_socket(&sock).unwrap();
+        UnixStream::connect(&sock).expect("listener must answer");
+    }
+
     fn test_state() -> State {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -761,7 +852,8 @@ mod tests {
                 let cache = VerdictCache::new(Duration::from_secs(60));
                 let backend: Arc<dyn EnforcementBackend> = Arc::new(MockBackend::default());
                 let snoozes = Arc::new(SnoozeStore::default());
-                handle_connection(server, &state, &cache, &backend, &snoozes)
+                let registry = AgentRegistry::default();
+                handle_connection(server, &state, &cache, &backend, &snoozes, &registry)
             })
         };
         let mut w = client.try_clone().unwrap();
@@ -2001,6 +2093,79 @@ mod tests {
             .remembered
             .get("/vaults", std::path::Path::new("/usr/bin/keepassxc"))
             .is_none());
+    }
+
+    fn write_events(log: &Path, uids: &[u32]) {
+        let mut log = fsnitch_core::eventlog::EventLog::open(log).unwrap();
+        for (i, uid) in uids.iter().enumerate() {
+            log.append(&crate::engine::make_record(
+                "/vaults",
+                Path::new("/vaults/a"),
+                Some(Path::new("/usr/bin/cat")),
+                i as i32,
+                Some(*uid),
+                false,
+                "policy",
+            ))
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn events_on_control_socket_return_all_uids() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        write_events(&log, &[1000, 1001]);
+        let c = ctl(&format!("[general]\nlog_file = {log:?}\n"));
+        match handle_request(
+            Request::Events { limit: 10 },
+            &c.state,
+            &c.cache,
+            &c.dyn_backend,
+            &c.snoozes,
+        ) {
+            Response::Events { events } => {
+                assert_eq!(
+                    events.iter().map(|e| e.uid).collect::<Vec<_>>(),
+                    vec![1000, 1001]
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_reports_any_connected_agent() {
+        let registry = crate::agent::AgentRegistry::default();
+        let status = || {
+            let mut resp = Response::Status {
+                version: String::new(),
+                paths: 0,
+                roots: vec![],
+                log_file: PathBuf::new(),
+                config_dir: PathBuf::new(),
+                degraded_roots: vec![],
+                agent_connected: false,
+            };
+            patch_agent_connected(&mut resp, registry.any());
+            resp
+        };
+        assert!(matches!(
+            status(),
+            Response::Status {
+                agent_connected: false,
+                ..
+            }
+        ));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        assert!(registry.register(1000, tx));
+        assert!(matches!(
+            status(),
+            Response::Status {
+                agent_connected: true,
+                ..
+            }
+        ));
     }
 
     #[test]

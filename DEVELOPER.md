@@ -6,8 +6,9 @@ For the design and how the pieces fit together, see
 ## Prerequisites
 
 - A recent Rust toolchain (edition 2021).
-- For the hardened build only: `libsystemd`, `gtk4`, `gtk4-layer-shell`.
-  On Arch: `sudo pacman -S --needed rust systemd gtk4 gtk4-layer-shell`.
+- For the hardened build only: `libsystemd`, `gtk4`, `gtk4-layer-shell`,
+  `libadwaita` (the GUI).
+  On Arch: `sudo pacman -S --needed rust systemd gtk4 gtk4-layer-shell libadwaita`.
 
 ## Build
 
@@ -56,12 +57,30 @@ sudo tests/e2e.sh         # enforcement: unlisted denied, allowlisted allowed
 sudo tests/e2e-prompt.sh  # interactive prompt via the headless mock agent
 sudo tests/e2e-hash.sh    # sha256 pin: correct pin allows, wrong pin denies
 sudo tests/e2e-cli.sh     # protect/show/unprotect, precedence, live marking
+sudo tests/e2e-status.sh  # read-only status socket: readable, uid-filtered, refuses changes
 ```
 
 Run them via `sudo` from your normal user — `e2e-prompt.sh` uses `$SUDO_UID`
 and `setpriv` to run the agent and subject as a non-root uid, matching the real
 case. The graphical overlay itself can't be checked headlessly; run
 `./tools/dev-run.sh` in a graphical session to exercise it.
+
+### Checking the GUI by hand
+
+`fsnitch-gui`'s logic (health, merging, command lines) is unit-tested in
+`fsnitch-gui/src/model.rs`; the widgets are checked by hand. With
+`./tools/dev-run.sh` running, start the GUI as printed there and walk through:
+
+- tray icon green; stop the agent → yellow with *Start agent*; stop the
+  daemon → red and the window greys out
+- protect a folder (mode Ask) → it appears in the sidebar
+- add a program (allow, pinned) → row shows *sha256* · *fixed*; add one for
+  15 min → *N min left*; deny one → *Denied*
+- trigger a prompt and answer *Always* → row shows *remembered*; trash it →
+  it prompts again
+- pause 15 min → sidebar badge + yellow tray; *Resume* clears it
+- cancel the pkexec dialog → toast *Cancelled*, the view snaps back
+- a path from `paths.d` is read-only; *Log* lists your recent accesses
 
 ## Layout
 
@@ -70,8 +89,9 @@ fsnitch-core/   # config, policy matching, protocol, verdict stores (pure)
 fsnitchd/       # root daemon: fanotify, engine, control socket, event log
 fsnitch-cli/    # the `fsnitch` command
 fsnitch-agent/  # graphical prompt agent
+fsnitch-gui/    # tray icon + management window (libadwaita)
 fsnitch-mock-agent/  # scripted agent for tests
-packaging/      # systemd units, default config, AUR PKGBUILDs
+packaging/      # systemd units, desktop file, icons, default config, AUR PKGBUILDs
 tools/          # dev-run.sh, install-local.sh
 tests/          # root e2e scripts
 ```

@@ -13,19 +13,20 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install toolchain and libraries
-        run: pacman -Syu --noconfirm git base-devel rust systemd gtk4 gtk4-layer-shell
+        run: pacman -Syu --noconfirm git base-devel rust systemd gtk4 gtk4-layer-shell libadwaita
       - uses: actions/checkout@v4
       - name: Build release binaries
         run: |
           cargo build --release -p fsnitchd --features session-hardening
-          cargo build --release -p fsnitch-cli -p fsnitch-agent
+          cargo build --release -p fsnitch-cli -p fsnitch-agent -p fsnitch-gui
       - name: Assemble binary package
         run: |
           ver="${GITHUB_REF_NAME#v}"
           pkg="fsnitch-${ver}-x86_64-linux"
           mkdir -p "$pkg"
-          cp target/release/fsnitchd target/release/fsnitch target/release/fsnitch-agent "$pkg/"
-          cp packaging/fsnitchd.service packaging/fsnitch-agent.service packaging/config.toml "$pkg/"
+          cp target/release/fsnitchd target/release/fsnitch target/release/fsnitch-agent target/release/fsnitch-gui "$pkg/"
+          cp packaging/fsnitchd.service packaging/fsnitch-agent.service packaging/fsnitch-gui.service packaging/fsnitch-gui.desktop packaging/config.toml "$pkg/"
+          cp -r packaging/icons "$pkg/"
           cp packaging/install-package.sh "$pkg/install.sh"
           cp README.md INSTALLATION.md USAGE.md CONFIGURATION.md SECURITY.md LICENSE "$pkg/"
           tar -caf "${pkg}.tar.zst" "$pkg"

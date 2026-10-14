@@ -10,6 +10,7 @@ mod procinfo;
 mod prompt;
 mod snooze;
 mod state;
+mod status;
 
 use agent::{AgentRegistry, PromptRuntime};
 use anyhow::Context;
@@ -18,7 +19,6 @@ use fsnitch_core::config::FailAction;
 use fsnitch_core::eventlog::{EventLog, EventRecord};
 use fsnitch_core::protocol::{DaemonMsg, PromptRequest};
 use prompt::{PendingKey, PendingPrompts, VerdictCache};
-use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -93,12 +93,15 @@ fn main() -> anyhow::Result<()> {
         // — the non-root agent must be able to traverse here to reach the socket.
         std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o755))?;
     }
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path)
-        .with_context(|| format!("binding {}", socket_path.display()))?;
+    let listener = control::claim_socket(&socket_path)?;
+    // Read-only status socket next to it (the GUI tray polls it as a normal
+    // user); it never mutates policy, see status.rs.
+    let status_path = socket_dir.join(status::STATUS_SOCKET_NAME);
+    let status_listener = control::claim_socket(&status_path)?;
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666))?;
+        std::fs::set_permissions(&status_path, std::fs::Permissions::from_mode(0o666))?;
     }
 
     // Enforcement backend, shared so prompts can be answered off the loop thread.
@@ -130,6 +133,11 @@ fn main() -> anyhow::Result<()> {
         let state = state.clone();
         let rt = rt.clone();
         std::thread::spawn(move || control::serve(listener, state, rt));
+    }
+    {
+        let state = state.clone();
+        let rt = rt.clone();
+        std::thread::spawn(move || status::serve(status_listener, state, rt));
     }
 
     // Timeout reaper: answers pending prompts that nobody decided in time.
@@ -231,6 +239,7 @@ fn main() -> anyhow::Result<()> {
                     path,
                     event.dev,
                     event.ino,
+                    event.btime,
                     event.exe.as_deref(),
                     event.pid,
                     event.uid,

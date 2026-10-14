@@ -6,7 +6,7 @@ pkgdesc="Interactive file-access guard for the Linux desktop (OpenSnitch, for fi
 arch=('x86_64' 'aarch64')
 url="https://github.com/balemy/fsnitch"
 license=('MIT')
-depends=('systemd' 'gtk4' 'gtk4-layer-shell')
+depends=('systemd' 'gtk4' 'gtk4-layer-shell' 'libadwaita' 'polkit')
 makedepends=('cargo')
 backup=('etc/fsnitch/config.toml')
 install="$pkgname.install"
@@ -23,7 +23,7 @@ build() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
     cargo build --frozen --release -p fsnitchd --features session-hardening
-    cargo build --frozen --release -p fsnitch-cli -p fsnitch-agent
+    cargo build --frozen --release -p fsnitch-cli -p fsnitch-agent -p fsnitch-gui
 }
 
 package() {
@@ -31,8 +31,15 @@ package() {
     install -Dm755 target/release/fsnitchd      "$pkgdir/usr/bin/fsnitchd"
     install -Dm755 target/release/fsnitch       "$pkgdir/usr/bin/fsnitch"
     install -Dm755 target/release/fsnitch-agent "$pkgdir/usr/bin/fsnitch-agent"
+    install -Dm755 target/release/fsnitch-gui   "$pkgdir/usr/bin/fsnitch-gui"
     install -Dm644 packaging/fsnitchd.service      "$pkgdir/usr/lib/systemd/system/fsnitchd.service"
     install -Dm644 packaging/fsnitch-agent.service "$pkgdir/usr/lib/systemd/user/fsnitch-agent.service"
+    install -Dm644 packaging/fsnitch-gui.service   "$pkgdir/usr/lib/systemd/user/fsnitch-gui.service"
+    install -Dm644 packaging/fsnitch-gui.desktop   "$pkgdir/usr/share/applications/fsnitch-gui.desktop"
+    install -Dm644 packaging/icons/fsnitch.svg     "$pkgdir/usr/share/icons/hicolor/scalable/apps/fsnitch.svg"
+    for icon in packaging/icons/fsnitch-*.svg; do
+        install -Dm644 "$icon" "$pkgdir/usr/share/icons/hicolor/scalable/status/${icon##*/}"
+    done
     install -Dm644 packaging/config.toml "$pkgdir/etc/fsnitch/config.toml"
     install -dm755 "$pkgdir/etc/fsnitch/paths.d"
     install -Dm644 LICENSE   "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

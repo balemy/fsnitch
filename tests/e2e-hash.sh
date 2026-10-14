@@ -12,6 +12,8 @@ elif [[ -x ./target/debug/fsnitchd ]]; then echo "note: cargo not found under su
 else echo "FAIL: build the workspace first (cargo build --workspace)"; exit 1; fi
 
 WORK=$(mktemp -d)
+# Own socket path — never touch /run/fsnitch of an installed daemon.
+SOCK="$WORK/fsnitchd.sock"
 DAEMON_PID=""
 trap 'kill "$DAEMON_PID" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
@@ -36,7 +38,7 @@ EOF
 }
 
 write_config "$GOOD"
-./target/debug/fsnitchd --config "$WORK/etc" & DAEMON_PID=$!
+./target/debug/fsnitchd --config "$WORK/etc" --socket "$SOCK" & DAEMON_PID=$!
 sleep 1
 kill -0 "$DAEMON_PID" || { echo "FAIL: daemon died on startup"; exit 1; }
 
@@ -50,7 +52,7 @@ echo "OK: cat denied"
 
 echo "--- wrong pin (after reload): same binary is denied"
 write_config "$WRONG"
-./target/debug/fsnitch reload
+./target/debug/fsnitch --socket "$SOCK" reload
 sleep 1
 if head -n1 "$WORK/protected/secret.txt" 2>/dev/null; then echo "FAIL: head allowed despite wrong pin"; exit 1; fi
 echo "OK: head denied with wrong pin"

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=fsnitch
+GenericName=File Access Guard
+Comment=See whether file protection is active and manage protected paths
+Exec=fsnitch-gui
+Icon=fsnitch
+Terminal=false
+Categories=System;Security;
+Keywords=security;files;protection;guard;
+StartupNotify=true

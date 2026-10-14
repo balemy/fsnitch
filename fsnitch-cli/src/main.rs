@@ -133,6 +133,9 @@ enum Command {
         /// Make the --program allow(s) temporary (e.g. 15m) instead of permanent
         #[arg(long = "for", conflicts_with = "pin")]
         duration: Option<String>,
+        /// Deny a program on the path (repeatable)
+        #[arg(long, conflicts_with = "duration")]
+        deny: Vec<PathBuf>,
         /// block | ask | watch (default ask; only changes an existing path when given)
         #[arg(long)]
         mode: Option<String>,
@@ -261,6 +264,7 @@ fn main() -> anyhow::Result<()> {
             program,
             pin,
             duration,
+            deny,
             mode,
         } => {
             let sub = matches
@@ -336,9 +340,26 @@ fn main() -> anyhow::Result<()> {
                         },
                     )? {
                         Response::Protected { path, note } => {
+                            for program in &deny {
+                                match request(
+                                    &socket,
+                                    &Request::Deny {
+                                        path: canon.clone(),
+                                        program: program.clone(),
+                                    },
+                                )? {
+                                    Response::Ok => {}
+                                    other => fail(other),
+                                }
+                            }
+                            let denied = if deny.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", {} denied", deny.len())
+                            };
                             ok(&format!(
                                 "protected {path}  {}",
-                                style::dim(&format!("{n} allowed program(s)"))
+                                style::dim(&format!("{n} allowed program(s){denied}"))
                             ));
                             if let Some(note) = note {
                                 println!("  {}", style::dim(&format!("note: {note}")));
@@ -487,11 +508,20 @@ fn overview(socket: &Path) -> anyhow::Result<()> {
             log_file,
             config_dir,
             degraded_roots,
+            agent_connected,
         } => {
             print!(
                 "{}",
                 output::render_banner_live(&version, paths, &config_dir)
             );
+            if !agent_connected {
+                println!(
+                    "{}",
+                    style::yellow(
+                        "no prompt agent connected — ask-mode accesses get the on_no_agent default, unprompted"
+                    )
+                );
+            }
             if !degraded_roots.is_empty() {
                 println!();
                 println!(
@@ -812,6 +842,40 @@ fn fail(resp: Response) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protect_accepts_repeatable_deny() {
+        let cli = Cli::try_parse_from([
+            "fsnitch",
+            "protect",
+            "/v",
+            "--deny",
+            "/usr/bin/curl",
+            "--deny",
+            "/usr/bin/wget",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Protect { deny, .. }) => {
+                assert_eq!(deny, vec![pb("/usr/bin/curl"), pb("/usr/bin/wget")])
+            }
+            _ => panic!("expected protect"),
+        }
+    }
+
+    #[test]
+    fn protect_deny_conflicts_with_for() {
+        assert!(Cli::try_parse_from([
+            "fsnitch",
+            "protect",
+            "/v",
+            "--deny",
+            "/usr/bin/curl",
+            "--for",
+            "15m",
+        ])
+        .is_err());
+    }
 
     fn pb(s: &str) -> PathBuf {
         PathBuf::from(s)

@@ -13,6 +13,9 @@ trust open them:
   a protected file, you get a simple **allow / deny** prompt.
 - **It remembers your choices** — trusted programs keep working without asking
   again; everything else is kept out.
+- **You see that it's working** — a shield in your tray turns green when
+  everything is running, and a settings window lets you manage it all without
+  the command line.
 - **It stops silent data theft** — the common trick where a program quietly
   reads your secrets and ships them off is blocked before it happens.
 
@@ -33,6 +36,11 @@ The first version was developed and tested primarily on **Arch Linux** with
 **Sway / wlroots** (the full-screen prompt overlay is a `wlr-layer-shell`
 surface, with a plain-window fallback elsewhere). It should work on other
 distros and compositors, but that's where it's proven.
+
+On Sway, start the prompt agent and the tray from your Sway config
+(`exec systemctl --user start fsnitch-agent fsnitch-gui`), since Sway doesn't activate
+`graphical-session.target` on its own. Without a running agent, accesses that
+should prompt are blocked silently. See [INSTALLATION.md](INSTALLATION.md).
 
 ## Docs
 

@@ -17,6 +17,9 @@ pub struct AccessEvent {
     /// if the stat failed (won't match any real tracked inode).
     pub dev: u64,
     pub ino: u64,
+    /// Birth time of the target, to unmask recycled inode numbers on the
+    /// inode-identity fallback. `None` if the filesystem reports no btime.
+    pub btime: Option<std::time::SystemTime>,
 }
 
 pub trait EnforcementBackend: Send + Sync {

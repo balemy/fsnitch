@@ -27,7 +27,7 @@ Prerequisites for the hardened build: a Rust toolchain plus the system
 libraries `libsystemd`, `gtk4`, and `gtk4-layer-shell`. On Arch:
 
 ```sh
-sudo pacman -S --needed rust systemd gtk4 gtk4-layer-shell
+sudo pacman -S --needed rust systemd gtk4 gtk4-layer-shell libadwaita
 ```
 
 ## Manual build
@@ -38,13 +38,20 @@ If you'd rather run the steps yourself.
 
 ```sh
 cargo build --release -p fsnitchd --features session-hardening
-cargo build --release -p fsnitch-cli -p fsnitch-agent
+cargo build --release -p fsnitch-cli -p fsnitch-agent -p fsnitch-gui
 
 sudo install -Dm755 target/release/fsnitchd       /usr/bin/fsnitchd
 sudo install -Dm755 target/release/fsnitch        /usr/bin/fsnitch
 sudo install -Dm755 target/release/fsnitch-agent  /usr/bin/fsnitch-agent
+sudo install -Dm755 target/release/fsnitch-gui    /usr/bin/fsnitch-gui
 sudo install -Dm644 packaging/fsnitchd.service      /usr/lib/systemd/system/fsnitchd.service
 sudo install -Dm644 packaging/fsnitch-agent.service /usr/lib/systemd/user/fsnitch-agent.service
+sudo install -Dm644 packaging/fsnitch-gui.service   /usr/lib/systemd/user/fsnitch-gui.service
+sudo install -Dm644 packaging/fsnitch-gui.desktop   /usr/share/applications/fsnitch-gui.desktop
+sudo install -Dm644 packaging/icons/fsnitch.svg     /usr/share/icons/hicolor/scalable/apps/fsnitch.svg
+for icon in packaging/icons/fsnitch-*.svg; do
+    sudo install -Dm644 "$icon" "/usr/share/icons/hicolor/scalable/status/${icon##*/}"
+done
 sudo install -Dm644 packaging/config.toml           /etc/fsnitch/config.toml
 ```
 
@@ -85,13 +92,30 @@ It installs the binaries, units, and default config, then enables the daemon
 sudo systemctl daemon-reload
 sudo systemctl enable --now fsnitchd
 
-# graphical session, no sudo:
-systemctl --user enable --now fsnitch-agent
+# graphical session, no sudo: prompt agent + tray
+systemctl --user enable --now fsnitch-agent fsnitch-gui
 
 sudo fsnitch protect /home/YOU/vaults --program /usr/bin/keepassxc
 sudo fsnitch preset apply browsers        # curated packs; `fsnitch preset list`
 sudo sysctl kernel.yama.ptrace_scope=1    # recommended companion hardening
 ```
+
+The agent unit starts with `graphical-session.target`. Some compositors
+(e.g. plain **Sway**, other wlroots setups without a session manager) never
+activate that target, so the agent silently stays down and every `ask` falls
+back to `on_no_agent` (blocked, no prompt). Start it from the compositor
+config instead, e.g. for Sway:
+
+```
+exec systemctl --user start fsnitch-agent
+exec systemctl --user start fsnitch-gui
+```
+
+Check with `systemctl --user status fsnitch-agent fsnitch-gui`. Changes made in
+the tray's manager window go through `pkexec`, which needs a polkit
+authentication agent in your session. GNOME and KDE bring one; on Sway install
+e.g. `polkit-gnome` (`sudo pacman -S polkit-gnome`) and add `exec
+/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1` to the config.
 
 ## AUR (later)
 

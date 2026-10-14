@@ -75,6 +75,7 @@ fsnitch dev environment is up.
   Trigger a prompt (another terminal):  cat $DEV/protected/secret.txt
   Reset remembered verdicts:            rm $DEV/etc/remembered.toml
   Manage (root):                        sudo ./target/debug/fsnitch --socket $SOCK protect <path> | show <path> | pause <path> 15m | resume | forget <path> | unprotect <path>
+  Tray + manager window:                FSNITCH_GUI_ICON_DIR=$REPO/packaging/icons ./target/debug/fsnitch-gui --socket $SOCK --cli $REPO/target/debug/fsnitch
   Stop everything:                      Ctrl-C here
 
 Daemon + agent logs follow:

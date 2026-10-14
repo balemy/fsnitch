@@ -26,6 +26,29 @@ You can also allow a program up front instead of waiting for the prompt:
 sudo fsnitch protect /home/you/vaults --program /usr/bin/keepassxc
 ```
 
+## The tray and manager window
+
+`fsnitch-gui` puts a shield in your tray (waybar's `tray` module, KDE, or GNOME
+with the AppIndicator extension):
+
+- **green** — the daemon is running and your prompt agent is connected
+- **yellow** — protection is limited: no agent (prompts are decided without
+  asking), a path is paused, or move protection is off for a huge root
+- **red** — the daemon is not reachable
+
+Click it (or start **fsnitch** from your app launcher) to open the manager. The
+sidebar lists your protected paths; each path's page shows its mode, lets you
+pause it, and lists every program with its access (allowed / denied) and where
+that comes from — a fixed rule, a remembered answer, or a timed one with its
+time left. The trash button removes a rule or forgets an answer. The **Log**
+page shows your own recent accesses.
+
+Viewing needs no privileges. Every change asks for your password (polkit /
+`pkexec`), so a polkit authentication agent must be running in your session —
+GNOME and KDE ship one; on Sway start one such as `polkit-gnome` or
+`lxqt-policykit`. Paths defined in drop-in files under `paths.d` are shown
+read-only.
+
 ## Modes
 
 Every protected path has a `mode` deciding what happens to a program that is
@@ -42,8 +65,9 @@ Set it with `--mode` on `protect` (default `ask`).
 ```sh
 sudo fsnitch protect <path> [--mode block|ask|watch] [--program P [--pin sha256|auto]]
 sudo fsnitch protect <path> --program P --for 15m   # temporary timed allow (ask paths)
+sudo fsnitch protect <path> --deny P                # deny one program (repeatable)
 sudo fsnitch unprotect <path>                       # remove the whole path
-sudo fsnitch unprotect <path> --program P           # remove just one allowed program
+sudo fsnitch unprotect <path> --program P           # remove just one program's allow/deny entry
 
 fsnitch                 # = status: one section per protected path
 fsnitch status
@@ -61,8 +85,8 @@ sudo fsnitch reload     # re-read config files after editing them
 ```
 
 `protect` is additive: re-running it on the same path merges in the new
-program(s) or mode instead of failing. There's no CLI `deny` — hand-write a
-`deny` entry (see [CONFIGURATION.md](CONFIGURATION.md)) if you need one.
+program(s) or mode instead of failing. `--deny` adds a fixed deny entry; a
+denied program is refused even on a `watch` path or when it is also allowed.
 
 Preset packs: `browsers`, `ssh`, `gnupg`, `password-managers`,
 `crypto-wallets`, `dev-credentials`. `apply` protects every path in the pack
@@ -90,3 +114,21 @@ editing. The full reference is in [CONFIGURATION.md](CONFIGURATION.md).
 Reload caveat: `reload` re-reads policies but does not re-scan filesystems, so
 protecting a path on a filesystem that had none before needs a daemon restart.
 The `protect` CLI marks new filesystems at runtime and is not affected.
+
+## Memory shown by systemd
+
+After a reboot, `systemctl status fsnitchd` can report hundreds of MB of
+memory. That number is the cgroup total, which includes kernel caches: the
+daemon scans every file under your protected paths at startup (for move
+protection), and on a cold boot it is the first process to touch them, so the
+kernel's dentry/inode caches for all those files land on its account. This
+cache is reclaimable — the kernel frees it automatically under memory
+pressure. The daemon's own footprint is what `VmRSS` reports (roughly
+300 bytes per tracked file):
+
+```sh
+grep VmRSS /proc/$(pidof fsnitchd)/status
+```
+
+Restarts later in the day show a small number for the same reason in reverse:
+the caches are already warm and charged to whoever touched them first.

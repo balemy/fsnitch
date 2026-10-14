@@ -21,6 +21,7 @@ protected path go through the policy engine.
 | `fsnitchd` | root (systemd system service) | fanotify backend, policy engine, event log, control socket |
 | `fsnitch` (`fsnitch-cli`) | user / root CLI | protect/unprotect, status, presets, log, reload |
 | `fsnitch-agent` | user (systemd user service) | the graphical prompt + desktop notifications |
+| `fsnitch-gui` | user (systemd user service) | tray icon showing whether daemon + agent are up, and a management window |
 | `fsnitch-mock-agent` | test only | headless agent that scripts verdicts for the e2e tests |
 
 The enforcement mechanism sits behind an `EnforcementBackend` trait in the
@@ -73,6 +74,25 @@ daemon verifies the peer is running the configured `agent` binary. With
 `--features session-hardening` it additionally requires the agent's uid to have
 an active graphical logind session. See [SECURITY.md](SECURITY.md) for what these
 checks do and don't prove.
+
+Next to it, `/run/fsnitch/status.sock` (also 0666) is a **read-only** socket for
+unprivileged readers such as the tray. It answers `status` (including whether
+the *caller's* agent is connected), `list`, `verdicts` and `events` (the tail of
+the event log, filtered to the caller's uid unless the caller is root) and
+refuses everything else.
+
+## The GUI
+
+`fsnitch-gui` polls `status.sock` every few seconds. A StatusNotifierItem tray
+icon (waybar, KDE, GNOME with the AppIndicator extension) shows green when the
+daemon is reachable and the user's agent is connected, yellow when protection is
+limited (no agent, a paused path, a root over the inode cap), and red when the
+daemon is unreachable. Clicking it opens a libadwaita window listing every
+protected path with its mode, pause state and one merged program list (fixed
+entries, remembered and temporary verdicts), plus the user's recent events.
+The GUI never talks to the control plane directly: every change runs the CLI as
+`pkexec fsnitch …`, so it is authenticated by polkit and goes through the same
+code path as a manual `sudo fsnitch`.
 
 ## The agent
 

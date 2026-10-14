@@ -12,10 +12,16 @@
 //! Freshness model:
 //! - `IN_CREATE` / `IN_MOVED_TO` on a regular file → index its `(dev, ino)`.
 //! - a new/moved-in subdirectory → watch it recursively and index its contents.
-//! - `IN_MOVED_FROM` → the file left a watched dir; drop the name link but KEEP
-//!   the inode indexed — a move out of the root is exactly what we protect.
+//! - `IN_MOVED_FROM` on a file → it left a watched dir; drop the name link but
+//!   KEEP the inode indexed — a move out of the root is exactly what we protect.
+//! - `IN_MOVED_FROM` on a directory → drop its subtree's watches and old-path
+//!   links (inodes stay indexed); a within-root rename rebuilds both via the
+//!   paired `IN_MOVED_TO` rescan.
 //! - `IN_DELETE` → a link was removed; evict the inode once its last known link
 //!   is gone (prevents churn, e.g. editor atomic-saves, from creeping the cap).
+//! - `IN_Q_OVERFLOW` → the kernel dropped events; rescan all roots rather than
+//!   trust the index (a missed delete would leave a stale entry that a recycled
+//!   inode number could later match).
 
 use fsnitch_core::inode_index::InodeIndex;
 use nix::errno::Errno;
@@ -102,6 +108,9 @@ struct Watcher {
     inotify: Inotify,
     live: LiveInodeIndex,
     cap: usize,
+    /// The currently watched roots, kept for a self-initiated rescan (e.g.
+    /// after an inotify queue overflow).
+    roots: Vec<PathBuf>,
     /// Watched directories, by watch descriptor.
     dirs: HashMap<WatchDescriptor, Dir>,
     /// Each tracked link's full path → the inode it points at.
@@ -135,6 +144,7 @@ impl Watcher {
             inotify,
             live,
             cap,
+            roots: roots.clone(),
             dirs: HashMap::new(),
             path_to_inode: HashMap::new(),
             inode_links: HashMap::new(),
@@ -171,9 +181,7 @@ impl Watcher {
                     _ => Vec::new(),
                 }
             };
-            for ev in &events {
-                self.handle(ev);
-            }
+            self.process(&events);
             loop {
                 match rx.try_recv() {
                     Ok(Cmd::Reseed(roots, cap)) => self.reseed(&roots, cap),
@@ -181,6 +189,25 @@ impl Watcher {
                     Err(TryRecvError::Empty) => break,
                 }
             }
+        }
+    }
+
+    /// Handle one drained batch of inotify events. An IN_Q_OVERFLOW in the
+    /// batch means the kernel dropped events (missed deletions would leave
+    /// stale inodes that a recycled inode number could match later) — the
+    /// whole batch is untrustworthy, so rescan the roots instead of replaying.
+    fn process(&mut self, events: &[InotifyEvent]) {
+        if events
+            .iter()
+            .any(|ev| ev.mask.contains(AddWatchFlags::IN_Q_OVERFLOW))
+        {
+            tracing::warn!("inotify event queue overflowed — rescanning all roots");
+            let roots = std::mem::take(&mut self.roots);
+            self.reseed(&roots, self.cap);
+            return;
+        }
+        for ev in events {
+            self.handle(ev);
         }
     }
 
@@ -194,6 +221,7 @@ impl Watcher {
         self.path_to_inode.clear();
         self.inode_links.clear();
         self.cap = cap;
+        self.roots = roots.to_vec();
         self.live.replace(InodeIndex::new(cap));
         self.seed(roots);
     }
@@ -208,7 +236,14 @@ impl Watcher {
                 Ok(md) if md.file_type().is_file() => {
                     // A single-file root: index it (no directory to watch, so no
                     // live updates — its inode identity is captured at seed time).
-                    self.index_file(Path::new(&*root), md.dev(), md.ino(), &root, root_idx);
+                    self.index_file(
+                        Path::new(&*root),
+                        md.dev(),
+                        md.ino(),
+                        md.created().ok(),
+                        &root,
+                        root_idx,
+                    );
                 }
                 Ok(md) if md.file_type().is_dir() => {
                     self.watch_tree(&PathBuf::from(&*root), &root, root_idx);
@@ -247,7 +282,14 @@ impl Watcher {
             let path = entry.path();
             if ft.is_file() {
                 if let Ok(md) = entry.metadata() {
-                    if !self.index_file(&path, md.dev(), md.ino(), root, root_idx) {
+                    if !self.index_file(
+                        &path,
+                        md.dev(),
+                        md.ino(),
+                        md.created().ok(),
+                        root,
+                        root_idx,
+                    ) {
                         self.degrade_root(root, root_idx);
                         return;
                     }
@@ -265,11 +307,12 @@ impl Watcher {
         path: &Path,
         dev: u64,
         ino: u64,
+        btime: Option<std::time::SystemTime>,
         _root: &Arc<str>,
         root_idx: u32,
     ) -> bool {
         let ok = self
-            .write_index(|g| g.try_insert(dev, ino, root_idx))
+            .write_index(|g| g.try_insert(dev, ino, root_idx, btime))
             .unwrap_or(false);
         if ok {
             self.set_link(path.to_path_buf(), (dev, ino));
@@ -327,16 +370,31 @@ impl Watcher {
             } else if let Ok(md) = std::fs::symlink_metadata(&full) {
                 if md.file_type().is_file() {
                     if let Some(root_idx) = self.write_index(|g| g.add_root(&root)) {
-                        if !self.index_file(&full, md.dev(), md.ino(), &root, root_idx) {
+                        if !self.index_file(
+                            &full,
+                            md.dev(),
+                            md.ino(),
+                            md.created().ok(),
+                            &root,
+                            root_idx,
+                        ) {
                             self.degrade_root(&root, root_idx);
                         }
                     }
                 }
             }
         } else if m.contains(AddWatchFlags::IN_MOVED_FROM) {
-            // Left this dir: drop the link but KEEP the inode indexed (a move
-            // out of the root is exactly what inode identity protects).
-            self.drop_link(&full, false);
+            if is_dir {
+                // A directory left this dir. Its subtree's old-path links and
+                // watches are stale and must go; the inodes stay indexed
+                // (move-out semantics). A rename within the root re-links and
+                // re-watches everything via the paired IN_MOVED_TO rescan.
+                self.drop_tree(&full);
+            } else {
+                // Left this dir: drop the link but KEEP the inode indexed (a
+                // move out of the root is exactly what inode identity protects).
+                self.drop_link(&full, false);
+            }
         } else if m.contains(AddWatchFlags::IN_DELETE) {
             // Unlinked: drop the link and evict the inode if it was the last one.
             self.drop_link(&full, true);
@@ -345,13 +403,43 @@ impl Watcher {
 
     /// Bind `path → ino`. If `path` previously pointed at a different inode
     /// (e.g. an atomic-save rename replaced it), that old inode loses this link.
+    /// Re-binding the same path to the same inode is a no-op — the seed scan
+    /// and a racing IN_CREATE event may both report one link, which must not
+    /// double-count it (a leaked count would block eviction forever).
     fn set_link(&mut self, path: PathBuf, ino: (u64, u64)) {
         if let Some(old) = self.path_to_inode.insert(path, ino) {
-            if old != ino {
-                self.dec_link(old, true);
+            if old == ino {
+                return;
             }
+            self.dec_link(old, true);
         }
         *self.inode_links.entry(ino).or_insert(0) += 1;
+    }
+
+    /// A directory under `prefix` left its watched parent (rename or move-out):
+    /// remove the watches and path links underneath it. Inodes stay indexed
+    /// (move-out semantics); a within-root rename rebuilds links and watches
+    /// when the paired IN_MOVED_TO rescans the subtree under its new path.
+    fn drop_tree(&mut self, prefix: &Path) {
+        let stale: Vec<WatchDescriptor> = self
+            .dirs
+            .iter()
+            .filter(|(_, d)| d.path.starts_with(prefix))
+            .map(|(wd, _)| *wd)
+            .collect();
+        for wd in stale {
+            let _ = self.inotify.rm_watch(wd);
+            self.dirs.remove(&wd);
+        }
+        let links: Vec<PathBuf> = self
+            .path_to_inode
+            .keys()
+            .filter(|p| p.starts_with(prefix))
+            .cloned()
+            .collect();
+        for path in links {
+            self.drop_link(&path, false);
+        }
     }
 
     /// Remove the link at `path`. `evict_if_last` distinguishes a true unlink
@@ -397,7 +485,7 @@ mod tests {
     fn wait_until(live: &LiveInodeIndex, key: (u64, u64), want_present: bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let present = live.with(|i| i.root_for(key.0, key.1).is_some());
+            let present = live.with(|i| i.root_for(key.0, key.1, None).is_some());
             if present == want_present {
                 return true;
             }
@@ -412,14 +500,17 @@ mod tests {
     fn read_and_replace() {
         let mut seed = InodeIndex::new(10);
         let r = seed.add_root("/v");
-        seed.try_insert(1, 1, r);
+        seed.try_insert(1, 1, r, None);
         let live = LiveInodeIndex::new(seed);
         assert_eq!(
-            live.with(|i| i.root_for(1, 1).map(str::to_string)),
+            live.with(|i| i.root_for(1, 1, None).map(str::to_string)),
             Some("/v".into())
         );
         live.replace(InodeIndex::new(10));
-        assert_eq!(live.with(|i| i.root_for(1, 1).map(str::to_string)), None);
+        assert_eq!(
+            live.with(|i| i.root_for(1, 1, None).map(str::to_string)),
+            None
+        );
     }
 
     #[test]
@@ -433,7 +524,7 @@ mod tests {
         let handle = spawn(vec![root.clone()], live.clone(), usize::MAX).unwrap();
         // Seed is synchronous in spawn(): the file is indexed immediately.
         let key = ino_of(&f);
-        assert!(live.with(|i| i.root_for(key.0, key.1).is_some()));
+        assert!(live.with(|i| i.root_for(key.0, key.1, None).is_some()));
         drop(handle);
     }
 
@@ -471,10 +562,117 @@ mod tests {
         // It must stay recognized by inode after the move settles.
         std::thread::sleep(Duration::from_millis(200));
         assert!(
-            live.with(|i| i.root_for(key.0, key.1).is_some()),
+            live.with(|i| i.root_for(key.0, key.1, None).is_some()),
             "moved-out file lost inode protection"
         );
         drop(handle);
+    }
+
+    #[test]
+    fn reindexing_the_same_link_does_not_block_eviction() {
+        // The seed scan and a racing IN_CREATE event can both index the same
+        // path+inode. That must count as ONE link: the file's deletion has to
+        // evict the inode, or a recycled inode number later matches an
+        // unrelated file.
+        let live = LiveInodeIndex::new(InodeIndex::new(usize::MAX));
+        let mut w = Watcher {
+            inotify: Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).unwrap(),
+            live: live.clone(),
+            cap: usize::MAX,
+            roots: Vec::new(),
+            dirs: HashMap::new(),
+            path_to_inode: HashMap::new(),
+            inode_links: HashMap::new(),
+        };
+        let root: Arc<str> = Arc::from("/v");
+        let root_idx = w.write_index(|g| g.add_root(&root)).unwrap();
+        let p = PathBuf::from("/v/f");
+        w.index_file(&p, 1, 7, None, &root, root_idx);
+        w.index_file(&p, 1, 7, None, &root, root_idx);
+        w.drop_link(&p, true);
+        assert!(
+            live.with(|i| i.root_for(1, 7, None).is_none()),
+            "double-indexed link kept the deleted inode in the index"
+        );
+    }
+
+    #[test]
+    fn dir_rename_within_root_then_delete_still_evicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("v");
+        std::fs::create_dir_all(&root).unwrap();
+        let live = LiveInodeIndex::new(InodeIndex::new(usize::MAX));
+        let handle = spawn(vec![root.clone()], live.clone(), usize::MAX).unwrap();
+
+        // Chromium-style staging: create a subdir with a file, then rename the
+        // subdir into place within the same root.
+        std::fs::create_dir(root.join("sub")).unwrap();
+        let f = root.join("sub/data.ldb");
+        std::fs::write(&f, "x").unwrap();
+        let key = ino_of(&f);
+        assert!(wait_until(&live, key, true), "file not indexed");
+
+        std::fs::rename(root.join("sub"), root.join("sub2")).unwrap();
+        // Let the watcher process the rename and rescan the directory.
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Deleting the file is a true unlink: its inode must leave the index,
+        // otherwise a recycled inode number later matches an unrelated file.
+        std::fs::remove_file(root.join("sub2/data.ldb")).unwrap();
+        assert!(
+            wait_until(&live, key, false),
+            "deleted file still indexed after its directory was renamed within the root"
+        );
+        drop(handle);
+    }
+
+    #[test]
+    fn queue_overflow_triggers_a_rescan() {
+        // On IN_Q_OVERFLOW the kernel dropped events — deletions may have been
+        // missed. The watcher must rescan its roots so the index matches the
+        // filesystem again.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("v");
+        std::fs::create_dir_all(&root).unwrap();
+        let stale = root.join("stale.kdbx");
+        std::fs::write(&stale, "x").unwrap();
+        let stale_key = ino_of(&stale);
+
+        let live = LiveInodeIndex::new(InodeIndex::new(usize::MAX));
+        let mut w = Watcher {
+            inotify: Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).unwrap(),
+            live: live.clone(),
+            cap: usize::MAX,
+            roots: vec![root.clone()],
+            dirs: HashMap::new(),
+            path_to_inode: HashMap::new(),
+            inode_links: HashMap::new(),
+        };
+        w.seed(std::slice::from_ref(&root));
+        assert!(live.with(|i| i.root_for(stale_key.0, stale_key.1, None).is_some()));
+
+        // Events for these are "lost" (never drained before the overflow).
+        std::fs::remove_file(&stale).unwrap();
+        let fresh = root.join("fresh.kdbx");
+        std::fs::write(&fresh, "y").unwrap();
+        let fresh_key = ino_of(&fresh);
+
+        let wd = *w.dirs.keys().next().unwrap();
+        w.process(&[InotifyEvent {
+            wd,
+            mask: AddWatchFlags::IN_Q_OVERFLOW,
+            cookie: 0,
+            name: None,
+        }]);
+
+        assert!(
+            live.with(|i| i.root_for(stale_key.0, stale_key.1, None).is_none()),
+            "deleted file survived the overflow rescan"
+        );
+        assert!(
+            live.with(|i| i.root_for(fresh_key.0, fresh_key.1, None).is_some()),
+            "existing file missing after the overflow rescan"
+        );
     }
 
     #[test]

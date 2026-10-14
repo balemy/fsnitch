@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// `(st_dev, st_ino)`.
 pub type InodeKey = (u64, u64);
@@ -21,8 +22,11 @@ pub type InodeKey = (u64, u64);
 pub struct InodeIndex {
     /// Interned root path strings, indexed by `root_idx`.
     roots: Vec<Arc<str>>,
-    /// `(dev, ino) -> root_idx`.
-    entries: HashMap<InodeKey, u32>,
+    /// `(dev, ino) -> (root_idx, birth time when indexed)`. The birth time
+    /// disambiguates a recycled inode number: the kernel reuses freed inode
+    /// numbers, so a bare `(dev, ino)` match could attribute an unrelated new
+    /// file to a protected root. `None` on filesystems without btime support.
+    entries: HashMap<InodeKey, (u32, Option<SystemTime>)>,
     /// `root_idx`es that exceeded the cap (entries dropped).
     degraded: Vec<u32>,
     /// Global maximum number of tracked inodes.
@@ -49,15 +53,22 @@ impl InodeIndex {
         i
     }
 
-    /// Insert `(dev, ino)` under `root_idx`. Returns false and inserts nothing if
-    /// the global cap is already reached (an update of an existing key always
-    /// succeeds — it does not grow the set).
-    pub fn try_insert(&mut self, dev: u64, ino: u64, root_idx: u32) -> bool {
+    /// Insert `(dev, ino)` under `root_idx`, remembering the file's birth time
+    /// (pass `None` if the filesystem does not report one). Returns false and
+    /// inserts nothing if the global cap is already reached (an update of an
+    /// existing key always succeeds — it does not grow the set).
+    pub fn try_insert(
+        &mut self,
+        dev: u64,
+        ino: u64,
+        root_idx: u32,
+        btime: Option<SystemTime>,
+    ) -> bool {
         let key = (dev, ino);
         if !self.entries.contains_key(&key) && self.entries.len() >= self.cap {
             return false;
         }
-        self.entries.insert(key, root_idx);
+        self.entries.insert(key, (root_idx, btime));
         true
     }
 
@@ -68,16 +79,25 @@ impl InodeIndex {
 
     /// Mark `root_idx` degraded: drop all its entries and record it.
     pub fn degrade(&mut self, root_idx: u32) {
-        self.entries.retain(|_, &mut idx| idx != root_idx);
+        self.entries.retain(|_, &mut (idx, _)| idx != root_idx);
         if !self.degraded.contains(&root_idx) {
             self.degraded.push(root_idx);
         }
     }
 
-    /// The protected root owning `(dev, ino)`, if tracked.
-    pub fn root_for(&self, dev: u64, ino: u64) -> Option<&str> {
-        let idx = *self.entries.get(&(dev, ino))?;
-        Some(&self.roots[idx as usize])
+    /// The protected root owning `(dev, ino)`, if tracked. `btime` is the
+    /// accessed file's birth time: when both it and the stored birth time are
+    /// known and disagree, the inode number was recycled by a different file
+    /// and the entry does not match. An unknown btime on either side falls
+    /// back to the bare `(dev, ino)` match.
+    pub fn root_for(&self, dev: u64, ino: u64, btime: Option<SystemTime>) -> Option<&str> {
+        let (idx, stored) = self.entries.get(&(dev, ino))?;
+        if let (Some(stored), Some(actual)) = (stored, btime) {
+            if *stored != actual {
+                return None;
+            }
+        }
+        Some(&self.roots[*idx as usize])
     }
 
     /// Roots that were degraded (cap exceeded), as owned strings for status.
@@ -109,7 +129,9 @@ pub fn scan_roots<P: AsRef<Path>>(roots: &[P], cap: usize) -> InodeIndex {
         let root = root.as_ref();
         let root_idx = idx.add_root(&root.to_string_lossy());
         let ok = match std::fs::symlink_metadata(root) {
-            Ok(md) if md.file_type().is_file() => idx.try_insert(md.dev(), md.ino(), root_idx),
+            Ok(md) if md.file_type().is_file() => {
+                idx.try_insert(md.dev(), md.ino(), root_idx, md.created().ok())
+            }
             Ok(md) if md.file_type().is_dir() => scan_dir(root, root_idx, &mut idx),
             // nonexistent / symlink / special: nothing to index
             _ => true,
@@ -135,7 +157,7 @@ fn scan_dir(dir: &Path, root_idx: u32, idx: &mut InodeIndex) -> bool {
         }
         if ft.is_file() {
             if let Ok(md) = entry.metadata() {
-                if !idx.try_insert(md.dev(), md.ino(), root_idx) {
+                if !idx.try_insert(md.dev(), md.ino(), root_idx, md.created().ok()) {
                     return false;
                 }
             }
@@ -159,9 +181,31 @@ mod tests {
     fn insert_and_lookup() {
         let mut idx = InodeIndex::new(100);
         let r = idx.add_root("/vaults");
-        assert!(idx.try_insert(66, 1234, r));
-        assert_eq!(idx.root_for(66, 1234), Some("/vaults"));
-        assert_eq!(idx.root_for(66, 9999), None);
+        assert!(idx.try_insert(66, 1234, r, None));
+        assert_eq!(idx.root_for(66, 1234, None), Some("/vaults"));
+        assert_eq!(idx.root_for(66, 9999, None), None);
+    }
+
+    #[test]
+    fn recycled_inode_number_does_not_match() {
+        use std::time::Duration;
+        let born = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let reborn = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        let mut idx = InodeIndex::new(100);
+        let r = idx.add_root("/vaults");
+        idx.try_insert(66, 1234, r, Some(born));
+
+        // Same (dev, ino) and same birth time: the tracked file itself.
+        assert_eq!(idx.root_for(66, 1234, Some(born)), Some("/vaults"));
+        // Same (dev, ino) but a different birth time: the inode number was
+        // freed and recycled by an unrelated new file — no match.
+        assert_eq!(idx.root_for(66, 1234, Some(reborn)), None);
+        // Unknown birth time on either side falls back to the bare match.
+        assert_eq!(idx.root_for(66, 1234, None), Some("/vaults"));
+        let mut no_btime = InodeIndex::new(100);
+        let r = no_btime.add_root("/vaults");
+        no_btime.try_insert(66, 1234, r, None);
+        assert_eq!(no_btime.root_for(66, 1234, Some(born)), Some("/vaults"));
     }
 
     #[test]
@@ -176,9 +220,9 @@ mod tests {
     fn cap_blocks_new_but_allows_update() {
         let mut idx = InodeIndex::new(1);
         let r = idx.add_root("/v");
-        assert!(idx.try_insert(1, 1, r));
-        assert!(!idx.try_insert(1, 2, r)); // cap reached
-        assert!(idx.try_insert(1, 1, r)); // update existing key still ok
+        assert!(idx.try_insert(1, 1, r, None));
+        assert!(!idx.try_insert(1, 2, r, None)); // cap reached
+        assert!(idx.try_insert(1, 1, r, None)); // update existing key still ok
         assert_eq!(idx.len(), 1);
     }
 
@@ -187,12 +231,12 @@ mod tests {
         let mut idx = InodeIndex::new(100);
         let a = idx.add_root("/a");
         let b = idx.add_root("/b");
-        idx.try_insert(1, 1, a);
-        idx.try_insert(1, 2, a);
-        idx.try_insert(1, 3, b);
+        idx.try_insert(1, 1, a, None);
+        idx.try_insert(1, 2, a, None);
+        idx.try_insert(1, 3, b, None);
         idx.degrade(a);
-        assert_eq!(idx.root_for(1, 1), None);
-        assert_eq!(idx.root_for(1, 3), Some("/b"));
+        assert_eq!(idx.root_for(1, 1, None), None);
+        assert_eq!(idx.root_for(1, 3, None), Some("/b"));
         assert_eq!(idx.degraded_roots(), vec!["/a".to_string()]);
     }
 
@@ -200,9 +244,9 @@ mod tests {
     fn remove_evicts() {
         let mut idx = InodeIndex::new(100);
         let r = idx.add_root("/v");
-        idx.try_insert(7, 7, r);
+        idx.try_insert(7, 7, r, None);
         idx.remove(7, 7);
-        assert_eq!(idx.root_for(7, 7), None);
+        assert_eq!(idx.root_for(7, 7, None), None);
     }
 
     #[test]
@@ -218,8 +262,14 @@ mod tests {
         let idx = scan_roots(std::slice::from_ref(&root), usize::MAX);
         let (da, ia) = ino_of(&a);
         let (db, ib) = ino_of(&b);
-        assert_eq!(idx.root_for(da, ia), Some(root.to_string_lossy().as_ref()));
-        assert_eq!(idx.root_for(db, ib), Some(root.to_string_lossy().as_ref()));
+        assert_eq!(
+            idx.root_for(da, ia, None),
+            Some(root.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            idx.root_for(db, ib, None),
+            Some(root.to_string_lossy().as_ref())
+        );
     }
 
     #[test]
@@ -234,10 +284,10 @@ mod tests {
         let idx = scan_roots(std::slice::from_ref(&root), usize::MAX);
         // The symlink's target lives outside the root and must not be indexed.
         let (dt, it) = ino_of(&target);
-        assert_eq!(idx.root_for(dt, it), None);
+        assert_eq!(idx.root_for(dt, it, None), None);
         // The root directory inode itself is not indexed.
         let (dr, ir) = ino_of(&root);
-        assert_eq!(idx.root_for(dr, ir), None);
+        assert_eq!(idx.root_for(dr, ir, None), None);
     }
 
     #[test]
@@ -247,7 +297,7 @@ mod tests {
         std::fs::write(&f, "x").unwrap();
         let idx = scan_roots(std::slice::from_ref(&f), usize::MAX);
         let (d, i) = ino_of(&f);
-        assert_eq!(idx.root_for(d, i), Some(f.to_string_lossy().as_ref()));
+        assert_eq!(idx.root_for(d, i, None), Some(f.to_string_lossy().as_ref()));
     }
 
     #[test]

@@ -4,7 +4,8 @@
 # effect immediately (dynamic fanotify mark, no restart), `fsnitch show` must
 # report the path as cli-managed, the most-specific path must win when paths
 # nest, `protect` is additive (re-protecting merges instead of failing), and
-# `unprotect` must lift enforcement (whole path, or just one `--program`).
+# `unprotect` must lift enforcement (whole path, or just one `--program`), and
+# `protect --deny` denies a single program.
 set -euo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
@@ -124,6 +125,15 @@ echo "--- protect --program --for injects a temporary verdict on an ask-mode pat
     || { echo "FAIL: timed allow not shown in status"; exit 1; }
 "${CLI[@]}" unprotect "$WORK/protected" >/dev/null
 echo "OK: timed allow works"
+
+echo "--- protect --deny denies one program on a watch-mode path"
+"${CLI[@]}" protect "$WORK/protected" --mode watch --deny "$CAT_BIN" >/dev/null
+if cat "$WORK/protected/secret.txt" 2>/dev/null; then
+    echo "FAIL: cat allowed despite --deny"; exit 1
+fi
+head -n1 "$WORK/protected/secret.txt" >/dev/null || { echo "FAIL: head denied on a watch path"; exit 1; }
+"${CLI[@]}" unprotect "$WORK/protected" >/dev/null
+echo "OK: protect --deny works"
 
 echo "--- preset list and dry-run are socket-free and safe"
 "${CLI[@]}" preset list | grep -q "browsers" || { echo "FAIL: preset list missing browsers"; exit 1; }
