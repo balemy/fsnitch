@@ -2,6 +2,13 @@
 
 ## 0.6.0 — Unreleased
 
+- Added: an access by a user without a prompt agent (typically root, e.g. a
+  backup run with `sudo`) now prompts the protected path's owner instead of
+  being denied silently. The answer applies to that user only: remembered and
+  temporary verdicts carry an optional `uid`, so allowing root's `python3`
+  does not allow your own. The dialog shows "Runs as root", and
+  `fsnitch status` marks such verdicts "as root". A path's owner also sees
+  pauses set on another user's behalf in the GUI.
 - Added: `fsnitch-gui`, a tray icon that shows at a glance whether protection
   is fully active (green: daemon + your prompt agent; yellow: no agent, a
   paused path or degraded move protection; red: daemon unreachable), plus a

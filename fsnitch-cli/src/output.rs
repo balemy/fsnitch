@@ -15,6 +15,16 @@ fn pause_scope(uid: Option<u32>) -> String {
     }
 }
 
+/// Suffix for a remembered/temporary verdict scoped to one uid (set when the
+/// prompt was answered on another user's behalf, e.g. a root backup).
+fn verdict_scope(uid: Option<u32>) -> String {
+    match uid {
+        None => String::new(),
+        Some(0) => " · as root".to_string(),
+        Some(uid) => format!(" · as uid {uid}"),
+    }
+}
+
 fn allow_badge() -> String {
     style::green("allow")
 }
@@ -74,7 +84,7 @@ pub(super) fn render_path_section(
         rows.push((
             badge,
             r.program.display().to_string(),
-            style::dim("remembered (always)"),
+            style::dim(&format!("remembered (always){}", verdict_scope(r.uid))),
         ));
     }
     for t in temporary {
@@ -82,7 +92,11 @@ pub(super) fn render_path_section(
         rows.push((
             badge,
             t.program.display().to_string(),
-            style::dim(&format!("temporary · {} left", fmt_secs(t.remaining_secs))),
+            style::dim(&format!(
+                "temporary · {} left{}",
+                fmt_secs(t.remaining_secs),
+                verdict_scope(t.uid)
+            )),
         ));
     }
 
@@ -182,7 +196,11 @@ pub(super) fn render_orphan_verdicts(
             "  {}  {}  {}",
             badge,
             r.program.display(),
-            style::dim(&format!("on {} · remembered (always)", r.path)),
+            style::dim(&format!(
+                "on {} · remembered (always){}",
+                r.path,
+                verdict_scope(r.uid)
+            )),
         );
     }
     for t in temporary.iter().filter(|t| is_orphan(&t.path)) {
@@ -193,9 +211,10 @@ pub(super) fn render_orphan_verdicts(
             badge,
             t.program.display(),
             style::dim(&format!(
-                "on {} · temporary · {} left",
+                "on {} · temporary · {} left{}",
                 t.path,
-                fmt_secs(t.remaining_secs)
+                fmt_secs(t.remaining_secs),
+                verdict_scope(t.uid)
             )),
         );
     }
@@ -242,11 +261,13 @@ mod tests {
         let remembered = RememberedInfo {
             path: "/home/luke/vaults".into(),
             program: PathBuf::from("/usr/bin/borg"),
+            uid: None,
             allow: true,
         };
         let temporary = TemporaryInfo {
             path: "/home/luke/vaults".into(),
             program: PathBuf::from("/usr/bin/cat"),
+            uid: None,
             allow: false,
             remaining_secs: 723,
         };
@@ -269,6 +290,26 @@ mod tests {
         );
         assert_eq!(lines[5], "  ⏸ paused  for uid 1000 · 41s left");
         assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn uid_scoped_verdicts_name_the_user() {
+        let remembered = RememberedInfo {
+            path: "/home/luke/vaults".into(),
+            program: PathBuf::from("/usr/bin/python3.14"),
+            uid: Some(0),
+            allow: true,
+        };
+        let temporary = TemporaryInfo {
+            path: "/home/luke/vaults".into(),
+            program: PathBuf::from("/usr/bin/cat"),
+            uid: Some(1001),
+            allow: true,
+            remaining_secs: 41,
+        };
+        let s = render_path_section(&summary(), &[&remembered], &[&temporary], &[]);
+        assert!(s.contains("remembered (always) · as root"));
+        assert!(s.contains("temporary · 41s left · as uid 1001"));
     }
 
     #[test]
@@ -304,11 +345,13 @@ mod tests {
             RememberedInfo {
                 path: "/a".into(),
                 program: PathBuf::from("/p"),
+                uid: None,
                 allow: true,
             },
             RememberedInfo {
                 path: "/b".into(),
                 program: PathBuf::from("/p"),
+                uid: None,
                 allow: true,
             },
         ];
@@ -329,11 +372,13 @@ mod tests {
         let remembered = vec![RememberedInfo {
             path: "/gone".into(),
             program: PathBuf::from("/usr/bin/x"),
+            uid: None,
             allow: false,
         }];
         let temporary = vec![TemporaryInfo {
             path: "/home/luke/vaults".into(), // known -> not an orphan
             program: PathBuf::from("/usr/bin/cat"),
+            uid: None,
             allow: true,
             remaining_secs: 5,
         }];
@@ -352,6 +397,7 @@ mod tests {
         let remembered = vec![RememberedInfo {
             path: "/a".into(),
             program: PathBuf::from("/p"),
+            uid: None,
             allow: true,
         }];
         assert!(render_orphan_verdicts(&known, &remembered, &[], &[]).is_none());

@@ -68,7 +68,9 @@ against:
   that exceeded `max_tracked_inodes` (it falls back to path-only — see
   `fsnitch status`).
 - **Multi-user / multi-seat desktops.** The design assumes a single interactive
-  user; prompts route to the one registered agent per uid.
+  user; prompts route to the one registered agent per uid, or — for a uid
+  without an agent, such as root — to the agent of the protected path's owner.
+  Verdicts given on another user's behalf apply to that user only.
 - **Signature or behavioural malware scanning.** fsnitch is policy, not
   detection — it never inspects file *contents* or program *behaviour*.
 

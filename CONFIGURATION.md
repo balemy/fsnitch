@@ -29,7 +29,7 @@ All keys are optional; defaults shown.
 [general]
 timeout               = 30                              # seconds to wait for an agent answer
 on_no_answer          = "deny"                          # deny | allow — prompt shown, nobody answered in time
-on_no_agent           = "deny"                          # deny | allow — no agent registered for the uid
+on_no_agent           = "deny"                          # deny | allow — no agent for the uid nor the path owner
 log_file              = "/var/log/fsnitch/events.jsonl" # JSON-lines event log
 agent                 = "/usr/bin/fsnitch-agent"        # binary a peer must run to register as the prompt agent
 max_pending           = 128                             # cap on concurrently parked prompts

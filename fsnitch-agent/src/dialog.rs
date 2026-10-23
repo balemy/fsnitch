@@ -330,14 +330,21 @@ fn build_card(
         l.set_hexpand(true);
         l
     });
-    add_fact(&facts, 1, "File", {
+    // Asked on another user's behalf (e.g. a root backup reading your files):
+    // say so, since the verdict then applies to that user only.
+    let mut row = 1;
+    if let Some(who) = foreign_user(req.uid) {
+        add_fact(&facts, row, "Runs as", mono(&who));
+        row += 1;
+    }
+    add_fact(&facts, row, "File", {
         let l = mono(&req.file.display().to_string());
         l.set_hexpand(true);
         l
     });
     let path_lbl = mono(&req.path);
     path_lbl.set_hexpand(true);
-    add_fact(&facts, 2, "Path", path_lbl);
+    add_fact(&facts, row + 1, "Path", path_lbl);
     body.append(&facts);
 
     // Duration selector: one shared "how long does this decision last" choice
@@ -509,6 +516,17 @@ fn mono(text: &str) -> gtk::Label {
     l.set_wrap(true);
     l.set_xalign(0.0);
     l
+}
+
+/// "root" / "uid N" when `uid` is not the agent's own user, else None.
+fn foreign_user(uid: u32) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let own = std::fs::metadata("/proc/self").ok()?.uid();
+    match uid {
+        u if u == own => None,
+        0 => Some("root (uid 0)".to_string()),
+        u => Some(format!("uid {u}")),
+    }
 }
 
 fn add_fact(grid: &gtk::Grid, row: i32, key: &str, value: impl IsA<gtk::Widget>) {

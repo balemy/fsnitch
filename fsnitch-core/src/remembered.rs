@@ -1,5 +1,7 @@
-//! Persistent remembered verdicts: (path, program) -> allow|deny.
+//! Persistent remembered verdicts: (path, program[, uid]) -> allow|deny.
 //! Written by the daemon when a user picks an "always" verdict in the prompt.
+//! An entry without `uid` applies to every user; one with `uid` only to that
+//! user's processes (set when the prompt was answered on another user's behalf).
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -12,6 +14,8 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 struct RememberedEntry {
     path: String,
     program: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uid: Option<u32>,
     /// true = allow forever, false = deny forever.
     allow: bool,
 }
@@ -75,46 +79,62 @@ impl RememberedStore {
         self.entries.is_empty()
     }
 
-    /// Look up a verdict; `Some(true)` = allow, `Some(false)` = deny, `None` = no entry.
-    pub fn get(&self, path: &str, program: &Path) -> Option<bool> {
+    /// Look up a verdict for an access by `uid`; `Some(true)` = allow,
+    /// `Some(false)` = deny, `None` = no entry. A uid-scoped entry wins over an
+    /// unscoped one.
+    pub fn get(&self, path: &str, program: &Path, uid: u32) -> Option<bool> {
+        let find = |scope: Option<u32>| {
+            self.entries
+                .iter()
+                .find(|e| e.path == path && e.program == program && e.uid == scope)
+                .map(|e| e.allow)
+        };
+        find(Some(uid)).or_else(|| find(None))
+    }
+
+    /// Whether any verdict (for any uid) exists for (path, program).
+    pub fn contains(&self, path: &str, program: &Path) -> bool {
         self.entries
             .iter()
-            .find(|e| e.path == path && e.program == program)
-            .map(|e| e.allow)
+            .any(|e| e.path == path && e.program == program)
     }
 
     /// Insert or replace a verdict and persist atomically (temp file + rename).
+    /// `uid` = None applies to every user.
     pub fn set(
         &mut self,
         path: &str,
         program: PathBuf,
+        uid: Option<u32>,
         allow: bool,
     ) -> Result<(), RememberedError> {
         if let Some(existing) = self
             .entries
             .iter_mut()
-            .find(|e| e.path == path && e.program == program)
+            .find(|e| e.path == path && e.program == program && e.uid == uid)
         {
             existing.allow = allow;
         } else {
             self.entries.push(RememberedEntry {
                 path: path.to_string(),
                 program,
+                uid,
                 allow,
             });
         }
         self.persist()
     }
 
-    /// All stored verdicts as (path, program, allow) triples.
-    pub fn entries(&self) -> Vec<(String, PathBuf, bool)> {
+    /// All stored verdicts as (path, program, uid, allow).
+    pub fn entries(&self) -> Vec<(String, PathBuf, Option<u32>, bool)> {
         self.entries
             .iter()
-            .map(|e| (e.path.clone(), e.program.clone(), e.allow))
+            .map(|e| (e.path.clone(), e.program.clone(), e.uid, e.allow))
             .collect()
     }
 
-    /// Drop verdicts for `path` (all of them, or only `program`'s) and persist.
+    /// Drop verdicts for `path` (all of them, or only `program`'s, for every
+    /// uid) and persist.
     /// Returns how many were removed.
     pub fn remove_matching(
         &mut self,
@@ -181,7 +201,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = RememberedStore::load(&dir.path().join("remembered.toml")).unwrap();
         assert_eq!(
-            store.get("/home/luke/vaults", &PathBuf::from("/usr/bin/keepassxc")),
+            store.get(
+                "/home/luke/vaults",
+                &PathBuf::from("/usr/bin/keepassxc"),
+                1000
+            ),
             None
         );
     }
@@ -192,23 +216,23 @@ mod tests {
         let path = dir.path().join("remembered.toml");
         let mut store = RememberedStore::load(&path).unwrap();
         store
-            .set("/vaults", PathBuf::from("/usr/bin/keepassxc"), true)
+            .set("/vaults", PathBuf::from("/usr/bin/keepassxc"), None, true)
             .unwrap();
         store
-            .set("/vaults", PathBuf::from("/tmp/stealer"), false)
+            .set("/vaults", PathBuf::from("/tmp/stealer"), None, false)
             .unwrap();
 
         let reloaded = RememberedStore::load(&path).unwrap();
         assert_eq!(
-            reloaded.get("/vaults", &PathBuf::from("/usr/bin/keepassxc")),
+            reloaded.get("/vaults", &PathBuf::from("/usr/bin/keepassxc"), 1000),
             Some(true)
         );
         assert_eq!(
-            reloaded.get("/vaults", &PathBuf::from("/tmp/stealer")),
+            reloaded.get("/vaults", &PathBuf::from("/tmp/stealer"), 1000),
             Some(false)
         );
         assert_eq!(
-            reloaded.get("/vaults", &PathBuf::from("/usr/bin/other")),
+            reloaded.get("/vaults", &PathBuf::from("/usr/bin/other"), 1000),
             None
         );
     }
@@ -219,13 +243,13 @@ mod tests {
         let path = dir.path().join("remembered.toml");
         let mut store = RememberedStore::load(&path).unwrap();
         store
-            .set("/vaults", PathBuf::from("/usr/bin/keepassxc"), true)
+            .set("/vaults", PathBuf::from("/usr/bin/keepassxc"), None, true)
             .unwrap();
         store
-            .set("/vaults", PathBuf::from("/tmp/stealer"), false)
+            .set("/vaults", PathBuf::from("/tmp/stealer"), None, false)
             .unwrap();
         store
-            .set("/other", PathBuf::from("/usr/bin/cat"), true)
+            .set("/other", PathBuf::from("/usr/bin/cat"), None, true)
             .unwrap();
         assert_eq!(store.entries().len(), 3);
 
@@ -236,9 +260,12 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert_eq!(store.get("/vaults", &PathBuf::from("/tmp/stealer")), None);
         assert_eq!(
-            store.get("/vaults", &PathBuf::from("/usr/bin/keepassxc")),
+            store.get("/vaults", &PathBuf::from("/tmp/stealer"), 1000),
+            None
+        );
+        assert_eq!(
+            store.get("/vaults", &PathBuf::from("/usr/bin/keepassxc"), 1000),
             Some(true)
         );
 
@@ -246,7 +273,7 @@ mod tests {
         assert_eq!(store.remove_matching("/vaults", None).unwrap(), 1);
         assert_eq!(store.remove_matching("/vaults", None).unwrap(), 0);
         assert_eq!(
-            store.get("/other", &PathBuf::from("/usr/bin/cat")),
+            store.get("/other", &PathBuf::from("/usr/bin/cat"), 1000),
             Some(true)
         );
 
@@ -260,9 +287,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remembered.toml");
         let mut store = RememberedStore::load(&path).unwrap();
-        store.set("/p", PathBuf::from("/x"), true).unwrap();
-        store.set("/p", PathBuf::from("/x"), false).unwrap();
-        assert_eq!(store.get("/p", &PathBuf::from("/x")), Some(false));
+        store.set("/p", PathBuf::from("/x"), None, true).unwrap();
+        store.set("/p", PathBuf::from("/x"), None, false).unwrap();
+        assert_eq!(store.get("/p", &PathBuf::from("/x"), 1000), Some(false));
         // no duplicate rows
         assert_eq!(store.len(), 1);
     }
@@ -270,9 +297,40 @@ mod tests {
     #[test]
     fn keys_are_path_and_program_specific() {
         let mut store = RememberedStore::default();
-        store.set("/p1", PathBuf::from("/x"), true).unwrap_or(());
+        store
+            .set("/p1", PathBuf::from("/x"), None, true)
+            .unwrap_or(());
         // (different path, same program) and (same path, different program) are distinct
-        assert_eq!(store.get("/p2", &PathBuf::from("/x")), None);
-        assert_eq!(store.get("/p1", &PathBuf::from("/y")), None);
+        assert_eq!(store.get("/p2", &PathBuf::from("/x"), 1000), None);
+        assert_eq!(store.get("/p1", &PathBuf::from("/y"), 1000), None);
+    }
+
+    #[test]
+    fn uid_scoped_entries_apply_only_to_that_uid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remembered.toml");
+        let mut store = RememberedStore::load(&path).unwrap();
+        let python = PathBuf::from("/usr/bin/python3.14");
+        store.set("/p", python.clone(), Some(0), true).unwrap();
+        assert_eq!(store.get("/p", &python, 0), Some(true));
+        assert_eq!(store.get("/p", &python, 1000), None);
+        assert!(store.contains("/p", &python));
+
+        // A scoped entry wins over an unscoped one; both coexist.
+        store.set("/p", python.clone(), None, false).unwrap();
+        assert_eq!(store.get("/p", &python, 0), Some(true));
+        assert_eq!(store.get("/p", &python, 1000), Some(false));
+        assert_eq!(store.len(), 2);
+
+        // uid survives a reload; unscoped entries are written without one.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("uid = 0").count(), 1);
+        let reloaded = RememberedStore::load(&path).unwrap();
+        assert_eq!(reloaded.get("/p", &python, 0), Some(true));
+        assert_eq!(reloaded.get("/p", &python, 1000), Some(false));
+
+        // forget drops every uid's entry for the program.
+        let mut reloaded = reloaded;
+        assert_eq!(reloaded.remove_matching("/p", Some(&python)).unwrap(), 2);
     }
 }

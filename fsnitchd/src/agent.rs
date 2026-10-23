@@ -39,6 +39,23 @@ impl AgentRegistry {
         self.agents.lock().unwrap().contains_key(&uid)
     }
 
+    /// Pick the agent to ask about an access by `uid`: that user's own agent,
+    /// else the agent of the protected path's `owner` (e.g. a root backup
+    /// reading files under /home/luke asks luke). Returns (agent uid, scope),
+    /// where scope is Some(uid) when asking on another user's behalf.
+    pub fn route(
+        &self,
+        uid: u32,
+        owner: impl FnOnce() -> Option<u32>,
+    ) -> Option<(u32, Option<u32>)> {
+        if self.has_agent(uid) {
+            return Some((uid, None));
+        }
+        owner()
+            .filter(|&o| o != uid && self.has_agent(o))
+            .map(|o| (o, Some(uid)))
+    }
+
     /// Whether an agent is registered for any uid.
     pub fn any(&self) -> bool {
         !self.agents.lock().unwrap().is_empty()
@@ -195,10 +212,11 @@ fn resolve_prompt(rt: &Arc<PromptRuntime>, id: u64, verdict: Verdict, peer_uid: 
     let allow = verdict.allows();
     match verdict {
         Verdict::Pause { secs } => {
-            // Scoped to the answering user's uid: other users stay protected.
+            // Scoped to the accessing user's uid (the answering user's own,
+            // unless asked on someone else's behalf): other users stay protected.
             rt.snoozes.set(
                 &p.key.path,
-                Some(peer_uid),
+                Some(p.key.uid.unwrap_or(peer_uid)),
                 std::time::Duration::from_secs(secs),
             );
         }
@@ -206,6 +224,7 @@ fn resolve_prompt(rt: &Arc<PromptRuntime>, id: u64, verdict: Verdict, peer_uid: 
             rt.cache.insert_with_ttl(
                 &p.key.path,
                 &p.key.program,
+                p.key.uid,
                 true,
                 std::time::Duration::from_secs(secs),
             );
@@ -214,20 +233,22 @@ fn resolve_prompt(rt: &Arc<PromptRuntime>, id: u64, verdict: Verdict, peer_uid: 
             rt.cache.insert_with_ttl(
                 &p.key.path,
                 &p.key.program,
+                p.key.uid,
                 false,
                 std::time::Duration::from_secs(secs),
             );
         }
         v if v.is_forever() => {
-            if let Err(err) = rt
-                .state
-                .set_remembered(&p.key.path, p.key.program.clone(), allow)
+            if let Err(err) =
+                rt.state
+                    .set_remembered(&p.key.path, p.key.program.clone(), p.key.uid, allow)
             {
                 tracing::error!("failed to persist remembered verdict: {err}");
             }
         }
         _ => {
-            rt.cache.insert(&p.key.path, &p.key.program, allow);
+            rt.cache
+                .insert(&p.key.path, &p.key.program, p.key.uid, allow);
         }
     }
     finish(rt, &p.key, p.tokens, allow, "prompt");
@@ -294,6 +315,22 @@ mod tests {
         assert_eq!(rx.recv().unwrap(), msg);
         // unknown uid -> false
         assert!(!reg.send(9999, msg));
+    }
+
+    #[test]
+    fn route_prefers_own_agent_then_path_owner() {
+        let reg = AgentRegistry::default();
+        let (tx, _rx) = channel();
+        reg.register(1000, tx);
+        // Own agent: asked directly, verdict unscoped.
+        assert_eq!(reg.route(1000, || Some(1000)), Some((1000, None)));
+        // root has no agent: the path owner is asked, verdict scoped to root.
+        assert_eq!(reg.route(0, || Some(1000)), Some((1000, Some(0))));
+        // Owner without an agent, or no owner known: nobody to ask.
+        assert_eq!(reg.route(0, || Some(1001)), None);
+        assert_eq!(reg.route(0, || None), None);
+        // The owner itself without an agent never routes to itself.
+        assert_eq!(reg.route(1001, || Some(1001)), None);
     }
 
     #[test]

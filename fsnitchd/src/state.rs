@@ -119,14 +119,21 @@ impl State {
 
     /// Persist a "forever" verdict to the remembered overlay and publish a new
     /// snapshot so subsequent decisions see it. Config + paths are unchanged.
-    pub fn set_remembered(&self, path: &str, program: PathBuf, allow: bool) -> anyhow::Result<()> {
+    /// `uid` = None applies to every user; Some(uid) only to that user.
+    pub fn set_remembered(
+        &self,
+        path: &str,
+        program: PathBuf,
+        uid: Option<u32>,
+        allow: bool,
+    ) -> anyhow::Result<()> {
         // Hold the write lock across the whole read-modify-persist-swap so two
         // concurrent "forever" verdicts can't lose each other's update or race
         // on the on-disk file.
         let _guard = self.write_lock.lock().unwrap();
         let current = self.snapshot();
         let mut remembered = current.remembered.clone();
-        remembered.set(path, program, allow)?;
+        remembered.set(path, program, uid, allow)?;
         let new_snapshot = Snapshot {
             config: current.config.clone(),
             rules: current.rules.clone(),
@@ -463,10 +470,10 @@ mod tests {
         write_config(dir.path(), "");
         let state = State::load(dir.path()).unwrap();
         state
-            .set_remembered("/p", std::path::PathBuf::from("/usr/bin/a"), true)
+            .set_remembered("/p", std::path::PathBuf::from("/usr/bin/a"), None, true)
             .unwrap();
         state
-            .set_remembered("/p", std::path::PathBuf::from("/usr/bin/b"), false)
+            .set_remembered("/p", std::path::PathBuf::from("/usr/bin/b"), None, false)
             .unwrap();
 
         // Program-filtered: only that entry goes.
@@ -479,12 +486,12 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(
             snap.remembered
-                .get("/p", std::path::Path::new("/usr/bin/a")),
+                .get("/p", std::path::Path::new("/usr/bin/a"), 1000),
             None
         );
         assert_eq!(
             snap.remembered
-                .get("/p", std::path::Path::new("/usr/bin/b")),
+                .get("/p", std::path::Path::new("/usr/bin/b"), 1000),
             Some(false)
         );
 
@@ -502,7 +509,12 @@ mod tests {
         let state = State::load(dir.path()).unwrap();
         state.add_managed_path(policy("/data/x")).unwrap();
         state
-            .set_remembered("/data/x", std::path::PathBuf::from("/usr/bin/x"), true)
+            .set_remembered(
+                "/data/x",
+                std::path::PathBuf::from("/usr/bin/x"),
+                None,
+                true,
+            )
             .unwrap();
         assert_eq!(
             state.remove_managed_path("/data/x").unwrap().as_deref(),
@@ -514,7 +526,7 @@ mod tests {
             state
                 .snapshot()
                 .remembered
-                .get("/data/x", std::path::Path::new("/usr/bin/x")),
+                .get("/data/x", std::path::Path::new("/usr/bin/x"), 1000),
             None
         );
         // Persisted, not just in-memory.
@@ -523,7 +535,7 @@ mod tests {
             reloaded
                 .snapshot()
                 .remembered
-                .get("/data/x", std::path::Path::new("/usr/bin/x")),
+                .get("/data/x", std::path::Path::new("/usr/bin/x"), 1000),
             None
         );
     }
@@ -555,24 +567,27 @@ mod tests {
             .set_remembered(
                 "/vaults",
                 std::path::PathBuf::from("/usr/bin/keepassxc"),
+                None,
                 true,
             )
             .unwrap();
         // visible in a fresh snapshot
         assert_eq!(
-            state
-                .snapshot()
-                .remembered
-                .get("/vaults", std::path::Path::new("/usr/bin/keepassxc")),
+            state.snapshot().remembered.get(
+                "/vaults",
+                std::path::Path::new("/usr/bin/keepassxc"),
+                1000
+            ),
             Some(true)
         );
         // and persisted to disk
         let reloaded = State::load(dir.path()).unwrap();
         assert_eq!(
-            reloaded
-                .snapshot()
-                .remembered
-                .get("/vaults", std::path::Path::new("/usr/bin/keepassxc")),
+            reloaded.snapshot().remembered.get(
+                "/vaults",
+                std::path::Path::new("/usr/bin/keepassxc"),
+                1000
+            ),
             Some(true)
         );
     }
@@ -594,7 +609,7 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(
             snap.remembered
-                .get("/vaults", std::path::Path::new("/usr/bin/keepassxc")),
+                .get("/vaults", std::path::Path::new("/usr/bin/keepassxc"), 1000),
             Some(true)
         );
     }

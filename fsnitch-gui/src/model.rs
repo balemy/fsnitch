@@ -482,6 +482,7 @@ mod tests {
             vec![TemporaryInfo {
                 path: "/a".into(),
                 program: "/usr/bin/git".into(),
+                uid: None,
                 allow: true,
                 remaining_secs: 240,
             }],
@@ -489,11 +490,13 @@ mod tests {
                 RememberedInfo {
                     path: "/a".into(),
                     program: "/usr/bin/curl".into(),
+                    uid: None,
                     allow: false,
                 },
                 RememberedInfo {
                     path: "/gone".into(),
                     program: "/usr/bin/cat".into(),
+                    uid: None,
                     allow: true,
                 },
             ],

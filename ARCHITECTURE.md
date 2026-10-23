@@ -49,14 +49,20 @@ that changes after load fails its pin — fail-safe — until the next reload.
 ## The prompt flow (`ask` mode)
 
 When an `ask`-mode open can't be decided outright, the daemon **parks** the
-blocked event and sends a prompt to the registered agent for that uid. The
-agent replies with a verdict and a duration:
+blocked event and sends a prompt to the registered agent for that uid. If
+that uid has no agent (typically root, e.g. a backup run with `sudo`), the
+prompt goes to the agent of the protected path's owner instead, so the owner
+decides about access to their own files. The agent replies with a verdict and
+a duration:
 
 - *once* answers are cached briefly (in memory);
 - *timed* answers (15 min / 1 hour) live in the daemon's memory;
 - *always* answers are written to `<config-dir>/remembered.toml`.
 
-If no agent is registered, or nobody answers within `timeout`, the daemon
+A verdict given on another user's behalf is scoped to that user (`uid` in
+`remembered.toml`): allowing root's `python3` does not allow your own.
+
+If no agent is found, or nobody answers within `timeout`, the daemon
 applies `on_no_agent` / `on_no_answer` (default deny). A background reaper
 answers prompts that time out so a blocked open never hangs forever.
 

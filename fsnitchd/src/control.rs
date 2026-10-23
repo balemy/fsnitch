@@ -236,20 +236,24 @@ pub(crate) fn handle_request(
             temporary: cache
                 .list()
                 .into_iter()
-                .map(|(path, program, allow, remaining_secs)| TemporaryInfo {
-                    path,
-                    program,
-                    allow,
-                    remaining_secs,
-                })
+                .map(
+                    |(path, program, uid, allow, remaining_secs)| TemporaryInfo {
+                        path,
+                        program,
+                        uid,
+                        allow,
+                        remaining_secs,
+                    },
+                )
                 .collect(),
             remembered: snapshot
                 .remembered
                 .entries()
                 .into_iter()
-                .map(|(path, program, allow)| RememberedInfo {
+                .map(|(path, program, uid, allow)| RememberedInfo {
                     path,
                     program,
+                    uid,
                     allow,
                 })
                 .collect(),
@@ -625,7 +629,7 @@ fn handle_remove_entry(
     // wants `forget`, not `remove` (which only edits fixed entries).
     let gov = resolve_path(snapshot, &path).unwrap_or_else(|| pattern.clone());
     let has_dynamic =
-        cache.get(&gov, &program).is_some() || snapshot.remembered.get(&gov, &program).is_some();
+        cache.contains(&gov, &program) || snapshot.remembered.contains(&gov, &program);
     let forget_hint = if has_dynamic {
         format!(
             " — {} has an active temporary/remembered verdict here; \
@@ -724,6 +728,7 @@ fn handle_allow_for(
     cache.insert_with_ttl(
         &policy.path,
         &program,
+        None,
         true,
         std::time::Duration::from_secs(secs),
     );
@@ -1514,7 +1519,7 @@ mod tests {
         // No fixed entry for /usr/bin/cat, but it has a temporary verdict (as
         // `fsnitch protect <path> --program P --for D` would leave behind).
         c.cache
-            .insert("/data", std::path::Path::new("/usr/bin/cat"), true);
+            .insert("/data", std::path::Path::new("/usr/bin/cat"), None, true);
 
         let resp = handle_request(
             Request::RemoveEntry {
@@ -2018,12 +2023,12 @@ mod tests {
     fn verdicts_lists_temporary_and_remembered_and_forget_removes() {
         let c = ctl(VAULTS_FILE);
         c.cache
-            .insert("/vaults", std::path::Path::new("/usr/bin/cat"), true);
+            .insert("/vaults", std::path::Path::new("/usr/bin/cat"), None, true);
         c.state
-            .set_remembered("/vaults", PathBuf::from("/usr/bin/keepassxc"), true)
+            .set_remembered("/vaults", PathBuf::from("/usr/bin/keepassxc"), None, true)
             .unwrap();
         c.state
-            .set_remembered("/vaults", PathBuf::from("/tmp/stealer"), false)
+            .set_remembered("/vaults", PathBuf::from("/tmp/stealer"), None, false)
             .unwrap();
 
         match handle_request(
@@ -2091,7 +2096,7 @@ mod tests {
             .state
             .snapshot()
             .remembered
-            .get("/vaults", std::path::Path::new("/usr/bin/keepassxc"))
+            .get("/vaults", std::path::Path::new("/usr/bin/keepassxc"), 1000)
             .is_none());
     }
 

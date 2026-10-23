@@ -19,6 +19,7 @@ use fsnitch_core::config::FailAction;
 use fsnitch_core::eventlog::{EventLog, EventRecord};
 use fsnitch_core::protocol::{DaemonMsg, PromptRequest};
 use prompt::{PendingKey, PendingPrompts, VerdictCache};
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -261,7 +262,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 engine::Decision::Prompt(ctx) => {
                     // Once-cache first (time-based; checked here, not in decide_event).
-                    if let Some(allow) = cache.get(&ctx.path, &ctx.program) {
+                    if let Some(allow) = cache.get(&ctx.path, &ctx.program, ctx.uid) {
                         let rec = engine::make_record(
                             &ctx.path,
                             path,
@@ -275,8 +276,11 @@ fn main() -> anyhow::Result<()> {
                         respond(&backend, event.token, allow);
                         continue;
                     }
-                    // No agent for this uid -> on_no_agent immediately.
-                    if !registry.has_agent(ctx.uid) {
+                    // Ask the uid's own agent, else the protected path owner's;
+                    // nobody to ask -> on_no_agent immediately.
+                    let Some((agent_uid, scope)) = registry.route(ctx.uid, || {
+                        std::fs::metadata(&ctx.path).ok().map(|m| m.uid())
+                    }) else {
                         let allow = snapshot.config.general.on_no_agent == FailAction::Allow;
                         let rec = engine::make_record(
                             &ctx.path,
@@ -290,11 +294,12 @@ fn main() -> anyhow::Result<()> {
                         log_record(&log, &rec);
                         respond(&backend, event.token, allow);
                         continue;
-                    }
+                    };
                     // Park and prompt.
                     let key = PendingKey {
                         program: ctx.program.clone(),
                         path: ctx.path.clone(),
+                        uid: scope,
                     };
                     let deadline = Instant::now() + timeout;
                     match pending.park(key, event.token, deadline) {
@@ -308,8 +313,8 @@ fn main() -> anyhow::Result<()> {
                                 uid: ctx.uid,
                                 timeout_secs: snapshot.config.general.timeout,
                             };
-                            if !registry.send(ctx.uid, DaemonMsg::Prompt(req)) {
-                                // Agent vanished between the has_agent check and
+                            if !registry.send(agent_uid, DaemonMsg::Prompt(req)) {
+                                // Agent vanished between the route check and
                                 // send: reclaim the token and apply on_no_agent.
                                 if let Some(p) = pending.take(id) {
                                     let allow =

@@ -6,10 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// TTL cache of "once" verdicts, keyed by (path, program).
+/// Cache key: (path, program, uid scope). Scope None = every user.
+type CacheKey = (String, PathBuf, Option<u32>);
+
+/// TTL cache of "once" verdicts, keyed by (path, program, uid scope).
 pub struct VerdictCache {
     ttl: Duration,
-    map: Mutex<HashMap<(String, PathBuf), (bool, Instant)>>,
+    map: Mutex<HashMap<CacheKey, (bool, Instant)>>,
 }
 
 impl VerdictCache {
@@ -20,30 +23,38 @@ impl VerdictCache {
         }
     }
 
-    pub fn insert(&self, path: &str, program: &Path, allow: bool) {
-        self.insert_with_ttl(path, program, allow, self.ttl);
+    pub fn insert(&self, path: &str, program: &Path, uid: Option<u32>, allow: bool) {
+        self.insert_with_ttl(path, program, uid, allow, self.ttl);
     }
 
     /// Insert with a caller-chosen TTL (timed allows from the dialog).
-    pub fn insert_with_ttl(&self, path: &str, program: &Path, allow: bool, ttl: Duration) {
+    pub fn insert_with_ttl(
+        &self,
+        path: &str,
+        program: &Path,
+        uid: Option<u32>,
+        allow: bool,
+        ttl: Duration,
+    ) {
         // Overflow-safe: a hostile/huge `secs` from the wire must not panic.
         let expiry = crate::snooze::deadline(ttl);
-        self.map
-            .lock()
-            .unwrap()
-            .insert((path.to_string(), program.to_path_buf()), (allow, expiry));
+        self.map.lock().unwrap().insert(
+            (path.to_string(), program.to_path_buf(), uid),
+            (allow, expiry),
+        );
     }
 
-    /// Active entries as (path, program, allow, remaining_secs); prunes expired.
-    pub fn list(&self) -> Vec<(String, PathBuf, bool, u64)> {
+    /// Active entries as (path, program, uid, allow, remaining_secs); prunes expired.
+    pub fn list(&self) -> Vec<(String, PathBuf, Option<u32>, bool, u64)> {
         let now = Instant::now();
         let mut map = self.map.lock().unwrap();
         map.retain(|_, (_, expiry)| *expiry > now);
         map.iter()
-            .map(|((path, program), (allow, expiry))| {
+            .map(|((path, program, uid), (allow, expiry))| {
                 (
                     path.clone(),
                     program.clone(),
+                    *uid,
                     *allow,
                     (*expiry - now).as_secs(),
                 )
@@ -51,26 +62,41 @@ impl VerdictCache {
             .collect()
     }
 
-    /// Remove entries for `path` (all of them, or only `program`'s). Returns the count.
+    /// Remove entries for `path` (all of them, or only `program`'s, for every
+    /// uid). Returns the count.
     pub fn remove(&self, path: &str, program: Option<&Path>) -> usize {
         let mut map = self.map.lock().unwrap();
         let before = map.len();
-        map.retain(|(p, prog), _| !(p == path && program.is_none_or(|x| prog == x)));
+        map.retain(|(p, prog, _), _| !(p == path && program.is_none_or(|x| prog == x)));
         before - map.len()
     }
 
-    /// Returns the cached verdict if present and not expired.
-    pub fn get(&self, path: &str, program: &Path) -> Option<bool> {
+    /// Returns the cached verdict for an access by `uid` if present and not
+    /// expired. A uid-scoped entry wins over an unscoped one.
+    pub fn get(&self, path: &str, program: &Path, uid: u32) -> Option<bool> {
         let mut map = self.map.lock().unwrap();
-        let key = (path.to_string(), program.to_path_buf());
-        match map.get(&key) {
-            Some((allow, expiry)) if *expiry > Instant::now() => Some(*allow),
-            Some(_) => {
-                map.remove(&key);
-                None
+        let now = Instant::now();
+        for scope in [Some(uid), None] {
+            let key = (path.to_string(), program.to_path_buf(), scope);
+            match map.get(&key) {
+                Some((allow, expiry)) if *expiry > now => return Some(*allow),
+                Some(_) => {
+                    map.remove(&key);
+                }
+                None => {}
             }
-            None => None,
         }
+        None
+    }
+
+    /// Whether any live entry (for any uid) exists for (path, program).
+    pub fn contains(&self, path: &str, program: &Path) -> bool {
+        let now = Instant::now();
+        self.map
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|((p, prog, _), (_, expiry))| p == path && prog == program && *expiry > now)
     }
 
     pub fn flush(&self) {
@@ -78,11 +104,15 @@ impl VerdictCache {
     }
 }
 
-/// Dedupe key: one open prompt per (path, program).
+/// Dedupe key: one open prompt per (path, program, uid scope).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PendingKey {
     pub program: PathBuf,
     pub path: String,
+    /// Some(uid) when the prompt was routed to another user's agent (the path
+    /// owner's) on behalf of `uid`: the verdict is then scoped to `uid`.
+    /// None = asked the accessing user's own agent; verdicts apply as before.
+    pub uid: Option<u32>,
 }
 
 /// A parked set of events awaiting one verdict.
@@ -177,14 +207,14 @@ mod cache_tests {
     #[test]
     fn hit_within_ttl_then_miss_after_expiry() {
         let cache = VerdictCache::new(Duration::from_millis(40));
-        cache.insert("vaults", &PathBuf::from("/usr/bin/keepassxc"), true);
+        cache.insert("vaults", &PathBuf::from("/usr/bin/keepassxc"), None, true);
         assert_eq!(
-            cache.get("vaults", &PathBuf::from("/usr/bin/keepassxc")),
+            cache.get("vaults", &PathBuf::from("/usr/bin/keepassxc"), 1000),
             Some(true)
         );
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(
-            cache.get("vaults", &PathBuf::from("/usr/bin/keepassxc")),
+            cache.get("vaults", &PathBuf::from("/usr/bin/keepassxc"), 1000),
             None
         );
     }
@@ -192,26 +222,32 @@ mod cache_tests {
     #[test]
     fn keys_are_rule_and_exe_specific() {
         let cache = VerdictCache::new(Duration::from_secs(60));
-        cache.insert("r1", &PathBuf::from("/x"), false);
-        assert_eq!(cache.get("r1", &PathBuf::from("/x")), Some(false));
-        assert_eq!(cache.get("r2", &PathBuf::from("/x")), None);
-        assert_eq!(cache.get("r1", &PathBuf::from("/y")), None);
+        cache.insert("r1", &PathBuf::from("/x"), None, false);
+        assert_eq!(cache.get("r1", &PathBuf::from("/x"), 1000), Some(false));
+        assert_eq!(cache.get("r2", &PathBuf::from("/x"), 1000), None);
+        assert_eq!(cache.get("r1", &PathBuf::from("/y"), 1000), None);
     }
 
     #[test]
     fn custom_ttl_list_and_remove() {
         let cache = VerdictCache::new(Duration::from_secs(60));
-        cache.insert("vaults", Path::new("/usr/bin/cat"), true);
-        cache.insert_with_ttl("vaults", Path::new("/usr/bin/dd"), false, Duration::ZERO);
-        cache.insert("other", Path::new("/usr/bin/cat"), false);
+        cache.insert("vaults", Path::new("/usr/bin/cat"), None, true);
+        cache.insert_with_ttl(
+            "vaults",
+            Path::new("/usr/bin/dd"),
+            None,
+            false,
+            Duration::ZERO,
+        );
+        cache.insert("other", Path::new("/usr/bin/cat"), None, false);
 
         // Zero-TTL entry is expired: not a hit, pruned from list.
-        assert_eq!(cache.get("vaults", Path::new("/usr/bin/dd")), None);
+        assert_eq!(cache.get("vaults", Path::new("/usr/bin/dd"), 1000), None);
         let listed = cache.list();
         assert_eq!(listed.len(), 2);
         assert!(listed
             .iter()
-            .all(|(_, _, _, remaining)| *remaining <= 60 && *remaining > 0));
+            .all(|(_, _, _, _, remaining)| *remaining <= 60 && *remaining > 0));
 
         // Program-filtered removal, then path-wide.
         assert_eq!(cache.remove("vaults", Some(Path::new("/usr/bin/cat"))), 1);
@@ -221,11 +257,28 @@ mod cache_tests {
     }
 
     #[test]
+    fn uid_scoped_entries_apply_only_to_that_uid() {
+        let cache = VerdictCache::new(Duration::from_secs(60));
+        let python = Path::new("/usr/bin/python3.14");
+        cache.insert("r", python, Some(0), true);
+        assert_eq!(cache.get("r", python, 0), Some(true));
+        assert_eq!(cache.get("r", python, 1000), None);
+        assert!(cache.contains("r", python));
+
+        // Scoped wins over unscoped; both are listed and removed together.
+        cache.insert("r", python, None, false);
+        assert_eq!(cache.get("r", python, 0), Some(true));
+        assert_eq!(cache.get("r", python, 1000), Some(false));
+        assert_eq!(cache.list().len(), 2);
+        assert_eq!(cache.remove("r", Some(python)), 2);
+    }
+
+    #[test]
     fn flush_clears_all() {
         let cache = VerdictCache::new(Duration::from_secs(60));
-        cache.insert("r", &PathBuf::from("/x"), true);
+        cache.insert("r", &PathBuf::from("/x"), None, true);
         cache.flush();
-        assert_eq!(cache.get("r", &PathBuf::from("/x")), None);
+        assert_eq!(cache.get("r", &PathBuf::from("/x"), 1000), None);
     }
 }
 
@@ -239,6 +292,7 @@ mod pending_tests {
         PendingKey {
             program: PathBuf::from(program),
             path: path.to_string(),
+            uid: None,
         }
     }
 

@@ -119,6 +119,9 @@ pub struct PauseInfo {
 pub struct TemporaryInfo {
     pub path: String,
     pub program: PathBuf,
+    /// None = every user; Some(uid) = only that user's processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
     pub allow: bool,
     pub remaining_secs: u64,
 }
@@ -128,6 +131,9 @@ pub struct TemporaryInfo {
 pub struct RememberedInfo {
     pub path: String,
     pub program: PathBuf,
+    /// None = every user; Some(uid) = only that user's processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
     pub allow: bool,
 }
 
@@ -407,12 +413,14 @@ mod tests {
                 temporary: vec![TemporaryInfo {
                     path: "/home/u/vaults".into(),
                     program: "/usr/bin/cat".into(),
+                    uid: None,
                     allow: true,
                     remaining_secs: 41,
                 }],
                 remembered: vec![RememberedInfo {
                     path: "/home/u/vaults".into(),
                     program: "/usr/bin/keepassxc".into(),
+                    uid: None,
                     allow: true,
                 }],
             },

@@ -144,7 +144,7 @@ pub fn decide_event(
                     "no_agent",
                 );
             };
-            if let Some(allow) = overlay.get(&policy.path, program) {
+            if let Some(allow) = overlay.get(&policy.path, program, uid) {
                 return resolved(
                     &policy.path,
                     path,
@@ -469,7 +469,12 @@ mod tests {
         let mut overlay = RememberedStore::default();
         let pins = PinHashes::default();
         overlay
-            .set("/vaults", std::path::PathBuf::from("/tmp/stealer"), true)
+            .set(
+                "/vaults",
+                std::path::PathBuf::from("/tmp/stealer"),
+                None,
+                true,
+            )
             .unwrap();
         let d = decide_event(
             &rules,
@@ -497,7 +502,12 @@ mod tests {
         let mut overlay = RememberedStore::default();
         let pins = PinHashes::default();
         overlay
-            .set("/vaults", std::path::PathBuf::from("/tmp/stealer"), false)
+            .set(
+                "/vaults",
+                std::path::PathBuf::from("/tmp/stealer"),
+                None,
+                false,
+            )
             .unwrap();
         let d = decide_event(
             &rules,

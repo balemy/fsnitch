@@ -76,6 +76,11 @@ fn handle_status_connection(stream: UnixStream, uid: u32, state: &State, rt: &Pr
     }
 }
 
+fn path_owner(path: &str) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.uid())
+}
+
 /// Answer one request from a peer with `uid`; everything that could change
 /// state is refused.
 pub(crate) fn handle_status_request(
@@ -104,7 +109,11 @@ pub(crate) fn handle_status_request(
             let mut resp = handle_request(Request::Verdicts, state, cache, backend, snoozes);
             if let Response::Verdicts { pauses, .. } = &mut resp {
                 if !root {
-                    pauses.retain(|p| p.uid.is_none() || p.uid == Some(uid));
+                    // Also show pauses set on another user's behalf (e.g. for
+                    // root) on paths this user owns: they answered that prompt.
+                    pauses.retain(|p| {
+                        p.uid.is_none() || p.uid == Some(uid) || path_owner(&p.path) == Some(uid)
+                    });
                 }
             }
             resp
@@ -316,6 +325,23 @@ mod tests {
         };
         assert_eq!(pauses(1000), 2);
         assert_eq!(pauses(0), 3);
+    }
+
+    #[test]
+    fn owner_sees_pauses_set_on_others_behalf() {
+        use std::os::unix::fs::MetadataExt;
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let owned = dir.path().to_str().unwrap();
+        let me = std::fs::metadata(owned).unwrap().uid();
+        let other = me.wrapping_add(1);
+        f.snoozes.set(owned, Some(0), Duration::from_secs(600));
+        let pauses = |uid| match f.ask(Request::Verdicts, uid) {
+            Response::Verdicts { pauses, .. } => pauses.len(),
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(pauses(me), 1);
+        assert_eq!(pauses(other), 0);
     }
 
     #[test]
